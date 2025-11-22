@@ -17,7 +17,16 @@ from auth_module import (
     create_user_for_company,
     change_password,
 )
-from crm_gateway import list_vendors, upsert_vendor, list_accounts, upsert_account
+from crm_gateway import (
+    list_vendors,
+    upsert_vendor,
+    list_accounts,
+    upsert_account,
+    get_vendor_name_list,
+    get_requester_options,
+    get_payable_account_options,
+    get_expense_asset_account_options,
+)
 from vouchers_module import list_vouchers, create_voucher, update_voucher_status
 from invoices_module import list_invoices, create_invoice
 from pdf_utils import build_voucher_pdf_bytes
@@ -30,14 +39,22 @@ def app_vouchers():
     username = user["username"]
     company_id = user["company_id"]
 
+    # --- CRM-driven options ---
+    vendor_options = get_vendor_name_list(company_id)
+    requester_options = get_requester_options(company_id)
+    account_options = get_expense_asset_account_options(company_id)
+
     st.subheader("Create Voucher")
 
     voucher_number = st.text_input("Voucher Number")
-    vendor = st.text_input("Vendor")
-    requester = st.text_input("Requester")
+    vendor = st.selectbox("Vendor (from CRM)", vendor_options)
+    requester = st.selectbox("Requester (Staff in CRM)", requester_options)
     invoice = st.text_input("Invoice Number")
 
-    uploaded = st.file_uploader("Attach supporting document (optional)", type=["pdf", "jpg", "png"])
+    uploaded = st.file_uploader(
+        "Attach supporting document (optional)",
+        type=["pdf", "jpg", "png"],
+    )
     file_name = None
     file_data = None
     if uploaded is not None:
@@ -46,25 +63,52 @@ def app_vouchers():
 
     st.markdown("**Voucher Lines**")
     lines = []
-    num_lines = st.number_input("Number of lines", min_value=1, max_value=20, value=1, step=1)
+    num_lines = st.number_input(
+        "Number of lines",
+        min_value=1,
+        max_value=20,
+        value=1,
+        step=1,
+    )
+
     for i in range(int(num_lines)):
         st.markdown(f"**Line {i+1}**")
         col1, col2, col3, col4, col5 = st.columns([3, 1, 2, 1, 1])
         with col1:
             desc = st.text_input("Description", key=f"line_desc_{i}")
         with col2:
-            amt = st.number_input("Amount", key=f"line_amt_{i}", min_value=0.0, step=0.01)
+            amt = st.number_input(
+                "Amount",
+                key=f"line_amt_{i}",
+                min_value=0.0,
+                step=0.01,
+            )
         with col3:
-            acct = st.text_input("Expense Account", key=f"line_acct_{i}")
+            acct = st.selectbox(
+                "Expense / Asset Account (Chart of Accounts)",
+                account_options,
+                key=f"line_acct_{i}",
+            )
         with col4:
-            vat = st.number_input("VAT %", key=f"line_vat_{i}", min_value=0.0, step=0.5)
+            vat = st.number_input(
+                "VAT %",
+                key=f"line_vat_{i}",
+                min_value=0.0,
+                step=0.5,
+            )
         with col5:
-            wht = st.number_input("WHT %", key=f"line_wht_{i}", min_value=0.0, step=0.5)
+            wht = st.number_input(
+                "WHT %",
+                key=f"line_wht_{i}",
+                min_value=0.0,
+                step=0.5,
+            )
 
         lines.append(
             {
                 "description": desc,
                 "amount": amt,
+                # keep this key name to stay compatible with existing voucher_lines/pdf utils
                 "expense_account": acct,
                 "vat_percent": vat,
                 "wht_percent": wht,
@@ -86,7 +130,11 @@ def app_vouchers():
                 file_name=file_name,
                 file_data=file_data,
             )
-            st.success(f"Voucher created with ID {vid} (status: draft)")
+            if isinstance(vid, str) and not vid.isdigit():
+                # In case your create_voucher returns an error string in some versions
+                st.error(vid)
+            else:
+                st.success(f"Voucher created with ID {vid} (status: draft)")
 
     st.markdown("---")
     st.subheader("Recent Vouchers")
@@ -150,14 +198,25 @@ def app_vouchers():
                     if err:
                         st.error(err)
                     else:
-                        st.success(f"Voucher {selected_id} updated to status '{new_status}'.")
+                        st.success(
+                            f"Voucher {selected_id} updated to status '{new_status}'."
+                        )
                         st.experimental_rerun()
 
         st.markdown("**Export to PDF**")
-        pdf_id = st.number_input("Voucher ID to export", min_value=0, step=1, value=0, key="pdf_voucher_id")
+        pdf_id = st.number_input(
+            "Voucher ID to export",
+            min_value=0,
+            step=1,
+            value=0,
+            key="pdf_voucher_id",
+        )
         if pdf_id > 0 and st.button("Download Voucher PDF"):
             try:
-                pdf_bytes = build_voucher_pdf_bytes(company_id=company_id, voucher_id=int(pdf_id))
+                pdf_bytes = build_voucher_pdf_bytes(
+                    company_id=company_id,
+                    voucher_id=int(pdf_id),
+                )
                 st.download_button(
                     label="Download PDF",
                     data=pdf_bytes,
@@ -176,25 +235,60 @@ def app_invoices():
     username = user["username"]
     company_id = user["company_id"]
 
+    # --- CRM-driven options ---
+    vendor_options = get_vendor_name_list(company_id)
+    payable_options = get_payable_account_options(company_id)
+    expense_asset_options = get_expense_asset_account_options(company_id)
+
     st.subheader("Create Invoice")
 
     invoice_number = st.text_input("Invoice Number")
     vendor_invoice_number = st.text_input("Vendor Invoice Number")
-    vendor = st.text_input("Vendor")
+    vendor = st.selectbox("Vendor (from CRM)", vendor_options)
     summary = st.text_area("Summary")
 
-    vatable_amount = st.number_input("Vatable Amount", min_value=0.0, step=0.01)
-    vat_rate = st.number_input("VAT Rate (%)", min_value=0.0, step=0.5)
-    wht_rate = st.number_input("WHT Rate (%)", min_value=0.0, step=0.5)
-    non_vatable_amount = st.number_input("Non-vatable Amount", min_value=0.0, step=0.01)
+    vatable_amount = st.number_input(
+        "Vatable Amount",
+        min_value=0.0,
+        step=0.01,
+    )
+    vat_rate = st.number_input(
+        "VAT Rate (%)",
+        min_value=0.0,
+        step=0.5,
+    )
+    wht_rate = st.number_input(
+        "WHT Rate (%)",
+        min_value=0.0,
+        step=0.5,
+    )
+    non_vatable_amount = st.number_input(
+        "Non-vatable Amount",
+        min_value=0.0,
+        step=0.01,
+    )
 
     terms = st.text_area("Terms")
-    currency = st.selectbox("Currency", ["NGN", "USD", "GBP", "EUR"], index=0)
+    currency = st.selectbox(
+        "Currency",
+        ["NGN", "USD", "GBP", "EUR"],
+        index=0,
+    )
 
-    payable_account = st.text_input("Payable Account Code")
-    expense_asset_account = st.text_input("Expense/Asset Account Code")
+    payable_account = st.selectbox(
+        "Payable Account (Chart of Accounts)",
+        payable_options,
+    )
+    expense_asset_account = st.selectbox(
+        "Expense / Asset Account (Chart of Accounts)",
+        expense_asset_options,
+    )
 
-    uploaded = st.file_uploader("Attach invoice document (optional)", type=["pdf", "jpg", "png"], key="inv_file")
+    uploaded = st.file_uploader(
+        "Attach invoice document (optional)",
+        type=["pdf", "jpg", "png"],
+        key="inv_file",
+    )
     file_name = None
     file_data = None
     if uploaded is not None:
@@ -223,7 +317,11 @@ def app_invoices():
                 file_name=file_name,
                 file_data=file_data,
             )
-            st.success(f"Invoice created with ID {iid}")
+            if isinstance(iid, str) and not iid.isdigit():
+                # In case your create_invoice returns an error string in some versions
+                st.error(iid)
+            else:
+                st.success(f"Invoice created with ID {iid}")
 
     st.markdown("---")
     st.subheader("Recent Invoices")
@@ -278,7 +376,11 @@ def app_crm():
     with st.form("account_form"):
         code = st.text_input("Account Code")
         name = st.text_input("Account Name")
-        acc_type = st.selectbox("Type", ["payable", "expense", "asset"], index=0)
+        acc_type = st.selectbox(
+            "Type",
+            ["payable", "expense", "asset"],
+            index=0,
+        )
         submitted = st.form_submit_button("Save Account")
         if submitted:
             if not code or not name:
@@ -310,7 +412,9 @@ def app_user_management():
     admin_name = admin["username"]
     company_id = admin["company_id"]
 
-    st.subheader(f"User Management – {admin['company_name']} ({admin['company_code']})")
+    st.subheader(
+        f"User Management – {admin['company_name']} ({admin['company_code']})"
+    )
 
     st.markdown("### Create New User")
 
@@ -322,7 +426,10 @@ def app_user_management():
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            can_create_voucher = st.checkbox("Can create vouchers", value=True)
+            can_create_voucher = st.checkbox(
+                "Can create vouchers",
+                value=True,
+            )
         with col2:
             can_approve_voucher = st.checkbox(
                 "Can approve vouchers",
@@ -365,7 +472,10 @@ def app_user_management():
         return
 
     for u in users:
-        with st.expander(f"{u['username']} (role: {u['role']})", expanded=False):
+        with st.expander(
+            f"{u['username']} (role: {u['role']})",
+            expanded=False,
+        ):
             with st.form(f"edit_user_{u['id']}"):
                 role = st.selectbox(
                     "Role",
@@ -420,7 +530,9 @@ def app_account():
 
     st.markdown(f"**Username:** {username}")
     st.markdown(f"**Role:** {user['role']}")
-    st.markdown(f"**Company:** {user['company_name']} ({user['company_code']})")
+    st.markdown(
+        f"**Company:** {user['company_name']} ({user['company_code']})"
+    )
 
     st.markdown("---")
     st.subheader("Change Password")
@@ -447,7 +559,10 @@ def app_db_browser():
     require_admin()
     st.subheader("DB Browser (admin only)")
 
-    query = st.text_area("SQL Query", "SELECT * FROM vouchers ORDER BY id DESC LIMIT 50;")
+    query = st.text_area(
+        "SQL Query",
+        "SELECT * FROM vouchers ORDER BY id DESC LIMIT 50;",
+    )
     if st.button("Run Query"):
         try:
             with connect() as conn:
@@ -460,7 +575,10 @@ def app_db_browser():
 
 
 def main():
-    st.set_page_config(page_title="VoucherPro – Multi-Company", layout="wide")
+    st.set_page_config(
+        page_title="VoucherPro – Multi-Company",
+        layout="wide",
+    )
 
     if "user" not in st.session_state:
         st.session_state["user"] = None
@@ -479,7 +597,6 @@ def main():
     if st.sidebar.button("Logout"):
         st.session_state["user"] = None
         st.rerun()
-
 
     menu = ["Vouchers", "Invoices", "CRM", "Account"]
 
