@@ -90,8 +90,23 @@ def create_company_and_admin(
     pw_hash = _hash_password(admin_password)
 
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        # Ensure companies table exists
+        # Ensure companies and users tables exist
         cur.execute(COMPANIES_TABLE_SQL)
+        cur.execute(AUTH_TABLE_SQL)
+
+        # --- HARDENED MIGRATION: make sure new columns exist on existing users table ---
+        # This is specifically to fix "column \"role\" of relation \"users\" does not exist"
+        for alter_sql in (
+            "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user';",
+            "ALTER TABLE users ADD COLUMN can_create_voucher BOOLEAN DEFAULT TRUE;",
+            "ALTER TABLE users ADD COLUMN can_approve_voucher BOOLEAN DEFAULT FALSE;",
+            "ALTER TABLE users ADD COLUMN can_manage_users BOOLEAN DEFAULT FALSE;",
+        ):
+            try:
+                cur.execute(alter_sql)
+            except Exception:
+                # If column already exists, we just ignore the error
+                pass
 
         # Check if company exists
         cur.execute(
@@ -113,10 +128,7 @@ def create_company_and_admin(
         )
         company_id = cur.fetchone()["id"]
 
-        # Ensure users table exists
-        cur.execute(AUTH_TABLE_SQL)
-
-        # Create admin
+        # Create admin user with role + permissions
         cur.execute(
             """
             INSERT INTO users (
