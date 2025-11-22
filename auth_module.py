@@ -190,21 +190,9 @@ def verify_user(company_code: str, username: str, password: str) -> Optional[Dic
         return None
 
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        # --- HARDENED MIGRATION: make sure new columns exist on existing users table ---
-        # This is specifically to fix "column u.role does not exist"
-        for alter_sql in (
-            "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user';",
-            "ALTER TABLE users ADD COLUMN can_create_voucher BOOLEAN DEFAULT TRUE;",
-            "ALTER TABLE users ADD COLUMN can_approve_voucher BOOLEAN DEFAULT FALSE;",
-            "ALTER TABLE users ADD COLUMN can_manage_users BOOLEAN DEFAULT FALSE;",
-        ):
-            try:
-                cur.execute(alter_sql)
-            except Exception:
-                # Ignore errors if the column already exists or other harmless issues
-                pass
-
-        # Now we can safely select the new columns
+        # At this point the DB schema should already be migrated
+        # (columns role, can_create_voucher, can_approve_voucher, can_manage_users exist),
+        # so we just run the SELECT.
         cur.execute(
             """
             SELECT
