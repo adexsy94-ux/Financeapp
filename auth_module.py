@@ -4,6 +4,7 @@
 import hashlib
 from contextlib import closing
 from typing import Optional, Dict, List
+
 import streamlit as st
 
 from db_config import connect, AUTH_TABLE_SQL, COMPANIES_TABLE_SQL, log_action
@@ -11,6 +12,26 @@ from db_config import connect, AUTH_TABLE_SQL, COMPANIES_TABLE_SQL, log_action
 
 def _hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+# ------------------------
+# Init helper (what app_main imports)
+# ------------------------
+
+def init_auth():
+    """
+    Ensure the users table exists.
+
+    Kept mainly for backward compatibility with app_main imports:
+    from auth_module import init_auth, ...
+    """
+    try:
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            cur.execute(AUTH_TABLE_SQL)
+            conn.commit()
+    except Exception:
+        # Don't crash app startup if this fails
+        pass
 
 
 # ------------------------
@@ -53,6 +74,10 @@ def create_company_and_admin(
     admin_username: str,
     admin_password: str,
 ) -> Optional[str]:
+    """
+    Create a new company and its first admin user.
+    Returns error message or None on success.
+    """
     company_name = (company_name or "").strip()
     company_code_norm = (company_code or "").strip().lower()
     admin_username_norm = (admin_username or "").strip().lower()
@@ -65,6 +90,7 @@ def create_company_and_admin(
     pw_hash = _hash_password(admin_password)
 
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        # Ensure companies table exists
         cur.execute(COMPANIES_TABLE_SQL)
 
         # Check if company exists
@@ -87,9 +113,10 @@ def create_company_and_admin(
         )
         company_id = cur.fetchone()["id"]
 
-        # Create admin
+        # Ensure users table exists
         cur.execute(AUTH_TABLE_SQL)
 
+        # Create admin
         cur.execute(
             """
             INSERT INTO users (
@@ -113,9 +140,13 @@ def create_company_and_admin(
 
         conn.commit()
 
-    log_action(admin_username_norm, "create_company_and_admin", "companies",
-               ref=str(company_id),
-               details=f"company_code={company_code_norm}")
+    log_action(
+        admin_username_norm,
+        "create_company_and_admin",
+        "companies",
+        ref=str(company_id),
+        details=f"company_code={company_code_norm}",
+    )
 
     return None
 
@@ -125,6 +156,10 @@ def create_company_and_admin(
 # ------------------------
 
 def verify_user(company_code: str, username: str, password: str) -> Optional[Dict]:
+    """
+    Verify that a username/password exists for a given company code.
+    Returns a dict with user + company info on success, None otherwise.
+    """
     company_code_norm = (company_code or "").strip().lower()
     username_norm = (username or "").strip().lower()
 
@@ -183,7 +218,9 @@ def current_user() -> Optional[Dict]:
 
 
 def require_login():
-    # If logged in, continue
+    """
+    If no user in session, render login / register UI and stop.
+    """
     if current_user() is not None:
         return
 
@@ -242,6 +279,11 @@ def require_admin():
 
 
 def require_permission(permission_flag: str):
+    """
+    Example: require_permission("can_create_voucher"),
+             require_permission("can_approve_voucher"),
+             require_permission("can_manage_users").
+    """
     user = current_user()
     if not user:
         require_login()
@@ -252,10 +294,13 @@ def require_permission(permission_flag: str):
 
 
 # ------------------------
-# User management
+# User management APIs
 # ------------------------
 
 def list_users(company_id: int) -> List[Dict]:
+    """
+    List all users for the given company.
+    """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """
@@ -285,7 +330,10 @@ def create_user_for_company(
     can_manage_users: bool,
     actor_username: str,
 ) -> Optional[str]:
-
+    """
+    Create a new user inside a company.
+    Returns error message or None on success.
+    """
     username_norm = (username or "").strip().lower()
     if not username_norm or not password:
         return "Username and password required."
@@ -322,8 +370,13 @@ def create_user_for_company(
             )
             conn.commit()
 
-        log_action(actor_username, "create_user", "users", ref=username_norm,
-                   details=f"company_id={company_id}, role={role}")
+        log_action(
+            actor_username,
+            "create_user",
+            "users",
+            ref=username_norm,
+            details=f"company_id={company_id}, role={role}",
+        )
         return None
 
     except Exception as e:
@@ -339,7 +392,9 @@ def update_user_permissions(
     can_approve_voucher: bool,
     can_manage_users: bool,
 ) -> Optional[str]:
-
+    """
+    Update role + permission flags for a user.
+    """
     if role not in ("user", "admin"):
         return "Invalid role."
 
@@ -371,9 +426,10 @@ def update_user_permissions(
             "update_user_permissions",
             "users",
             ref=str(user_id),
-            details=f"company_id={company_id}, role={role}"
+            details=f"company_id={company_id}, role={role}, "
+                    f"create={can_create_voucher}, approve={can_approve_voucher}, "
+                    f"manage_users={can_manage_users}",
         )
-
         return None
 
     except Exception as e:
@@ -381,6 +437,9 @@ def update_user_permissions(
 
 
 def change_password(company_id: int, username: str, old_password: str, new_password: str) -> Optional[str]:
+    """
+    Change password for a user in a given company.
+    """
     username_norm = (username or "").strip().lower()
     if not username_norm or not old_password or not new_password:
         return "All fields required."
