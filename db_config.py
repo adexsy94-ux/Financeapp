@@ -1,4 +1,5 @@
 # db_config.py
+# Database connection, schema initialization, and audit helpers
 
 import os
 from contextlib import closing
@@ -8,13 +9,223 @@ import psycopg2
 from psycopg2.extras import DictCursor
 
 
+# ------------------------
+# Connection
+# ------------------------
+
 def get_db_dsn() -> str:
     """
     Get the Postgres DSN.
 
-    It MUST be provided via environment / secrets (e.g. VOUCHER_DB_URL).
+    Priority:
+    1. Environment / secrets: VOUCHER_DB_URL (recommended)
+    2. Fallback: DATABASE_URL (if you ever use that name)
+
+    You MUST set at least VOUCHER_DB_URL in:
+      - Streamlit Cloud secrets, or
+      - Your local environment.
     """
-    dsn = os.getenv("VOUCHER_DB_URL")
+    dsn = os.getenv("VOUCHER_DB_URL") or os.getenv("DATABASE_URL")
     if not dsn:
         raise RuntimeError("Environment variable VOUCHER_DB_URL is not set.")
     return dsn
+
+
+def connect():
+    """
+    Return a psycopg2 connection using DictCursor for convenience.
+    Caller is responsible for closing.
+    """
+    dsn = get_db_dsn()
+    return psycopg2.connect(dsn, cursor_factory=DictCursor)
+
+
+def now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+# ------------------------
+# Schema (CREATE TABLE statements)
+# ------------------------
+
+AUTH_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+
+    -- Access control
+    role TEXT NOT NULL DEFAULT 'user',              -- 'admin', 'finance', 'viewer', etc.
+    can_create_voucher BOOLEAN NOT NULL DEFAULT TRUE,
+    can_approve_voucher BOOLEAN NOT NULL DEFAULT FALSE,
+    can_manage_users BOOLEAN NOT NULL DEFAULT FALSE,
+
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+VOUCHER_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS vouchers (
+    id              SERIAL PRIMARY KEY,
+    parent_id       INTEGER,
+    version         INTEGER DEFAULT 1,
+    voucher_number  TEXT,
+    vendor          TEXT,
+    requester       TEXT,
+    invoice         TEXT,
+    file_name       TEXT,
+    file_data       BYTEA,
+    last_modified   TIMESTAMPTZ,
+    status          TEXT NOT NULL DEFAULT 'draft',  -- draft / submitted / approved / rejected
+    approved_by     TEXT,
+    approved_at     TIMESTAMPTZ
+);
+"""
+
+VOUCHER_LINES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS voucher_lines (
+    id              SERIAL PRIMARY KEY,
+    voucher_id      INTEGER,
+    description     TEXT,
+    amount          NUMERIC,
+    expense_account TEXT,
+    vat_percent     NUMERIC,
+    wht_percent     NUMERIC,
+    vat_value       NUMERIC,
+    wht_value       NUMERIC,
+    total           NUMERIC
+);
+"""
+
+INVOICE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS invoices (
+    id                      SERIAL PRIMARY KEY,
+    parent_id               INTEGER,
+    version                 INTEGER DEFAULT 1,
+    invoice_number          TEXT,
+    vendor_invoice_number   TEXT,
+    vendor                  TEXT,
+    summary                 TEXT,
+    vatable_amount          NUMERIC DEFAULT 0.0,
+    vat_rate                NUMERIC DEFAULT 0.0,
+    wht_rate                NUMERIC DEFAULT 0.0,
+    vat_amount              NUMERIC DEFAULT 0.0,
+    wht_amount              NUMERIC DEFAULT 0.0,
+    non_vatable_amount      NUMERIC DEFAULT 0.0,
+    subtotal                NUMERIC DEFAULT 0.0,
+    total_amount            NUMERIC DEFAULT 0.0,
+    terms                   TEXT,
+    last_modified           TIMESTAMPTZ,
+    payable_account         TEXT,
+    expense_asset_account   TEXT,
+    currency                TEXT DEFAULT 'NGN',
+    file_name               TEXT,
+    file_data               BYTEA
+);
+"""
+
+AUDIT_LOG_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          SERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ,
+    username    TEXT,
+    action      TEXT,
+    entity      TEXT,
+    ref         TEXT,
+    details     TEXT
+);
+"""
+
+VENDORS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS vendors (
+    id              SERIAL PRIMARY KEY,
+    name            TEXT NOT NULL,
+    contact_person  TEXT,
+    bank_name       TEXT,
+    bank_account    TEXT,
+    notes           TEXT,
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+ACCOUNTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS accounts (
+    id              SERIAL PRIMARY KEY,
+    code            TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    type            TEXT NOT NULL, -- 'payable', 'expense', 'asset', etc.
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+# ------------------------
+# Schema init
+# ------------------------
+
+def init_schema():
+    """
+    Create all required tables if they don't exist.
+    Also attempts to backfill new columns on existing tables.
+    Call this once at app startup.
+    """
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        # Base tables
+        cur.execute(AUTH_TABLE_SQL)
+        cur.execute(VOUCHER_TABLE_SQL)
+        cur.execute(VOUCHER_LINES_TABLE_SQL)
+        cur.execute(INVOICE_TABLE_SQL)
+        cur.execute(AUDIT_LOG_TABLE_SQL)
+        cur.execute(VENDORS_TABLE_SQL)
+        cur.execute(ACCOUNTS_TABLE_SQL)
+
+        # Backward compatibility for older DBs — add new columns if missing.
+        # These ALTERs are wrapped in try/except so they don't break if column already exists.
+
+        # Ensure voucher status columns exist
+        try:
+            cur.execute("ALTER TABLE vouchers ADD COLUMN status TEXT NOT NULL DEFAULT 'draft';")
+        except psycopg2.Error:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE vouchers ADD COLUMN approved_by TEXT;")
+        except psycopg2.Error:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE vouchers ADD COLUMN approved_at TIMESTAMPTZ;")
+        except psycopg2.Error:
+            pass
+
+        conn.commit()
+
+
+# ------------------------
+# Audit logging
+# ------------------------
+
+def log_action(
+    username: str,
+    action: str,
+    entity: str,
+    ref: str | None = None,
+    details: str | None = None,
+) -> None:
+    """
+    Insert a row into audit_log.
+    This should NEVER crash the whole app: errors are swallowed.
+    """
+    try:
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            cur.execute(
+                """
+                INSERT INTO audit_log (ts, username, action, entity, ref, details)
+                VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s)
+                """,
+                (username, action, entity, ref, details),
+            )
+            conn.commit()
+    except Exception:
+        # Do not let logging failures kill the request.
+        pass
