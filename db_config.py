@@ -1,5 +1,5 @@
 # db_config.py
-# Database connection, schema initialization, and audit helpers
+# Database connection, schema initialization, and audit helpers (multi-tenant)
 
 import os
 from contextlib import closing
@@ -48,11 +48,22 @@ def now_iso() -> str:
 # Schema (CREATE TABLE statements)
 # ------------------------
 
+COMPANIES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS companies (
+    id          SERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    code        TEXT NOT NULL UNIQUE,
+    created_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 AUTH_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
+    username TEXT NOT NULL,
     password_hash TEXT NOT NULL,
+
+    company_id INTEGER REFERENCES companies(id),
 
     -- Access control
     role TEXT NOT NULL DEFAULT 'user',              -- 'admin', 'finance', 'viewer', etc.
@@ -60,7 +71,8 @@ CREATE TABLE IF NOT EXISTS users (
     can_approve_voucher BOOLEAN NOT NULL DEFAULT FALSE,
     can_manage_users BOOLEAN NOT NULL DEFAULT FALSE,
 
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (company_id, username)
 );
 """
 
@@ -69,6 +81,7 @@ CREATE TABLE IF NOT EXISTS vouchers (
     id              SERIAL PRIMARY KEY,
     parent_id       INTEGER,
     version         INTEGER DEFAULT 1,
+    company_id      INTEGER REFERENCES companies(id),
     voucher_number  TEXT,
     vendor          TEXT,
     requester       TEXT,
@@ -102,6 +115,7 @@ CREATE TABLE IF NOT EXISTS invoices (
     id                      SERIAL PRIMARY KEY,
     parent_id               INTEGER,
     version                 INTEGER DEFAULT 1,
+    company_id              INTEGER REFERENCES companies(id),
     invoice_number          TEXT,
     vendor_invoice_number   TEXT,
     vendor                  TEXT,
@@ -139,6 +153,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 VENDORS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS vendors (
     id              SERIAL PRIMARY KEY,
+    company_id      INTEGER REFERENCES companies(id),
     name            TEXT NOT NULL,
     contact_person  TEXT,
     bank_name       TEXT,
@@ -151,17 +166,13 @@ CREATE TABLE IF NOT EXISTS vendors (
 ACCOUNTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS accounts (
     id              SERIAL PRIMARY KEY,
+    company_id      INTEGER REFERENCES companies(id),
     code            TEXT NOT NULL,
     name            TEXT NOT NULL,
     type            TEXT NOT NULL, -- 'payable', 'expense', 'asset', etc.
     created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 """
-
-
-# ------------------------
-# Schema init
-# ------------------------
 
 def init_schema():
     """
@@ -170,7 +181,8 @@ def init_schema():
     Call this once at app startup.
     """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        # Base tables
+        # Base tables in safe order (companies first)
+        cur.execute(COMPANIES_TABLE_SQL)
         cur.execute(AUTH_TABLE_SQL)
         cur.execute(VOUCHER_TABLE_SQL)
         cur.execute(VOUCHER_LINES_TABLE_SQL)
@@ -179,38 +191,41 @@ def init_schema():
         cur.execute(VENDORS_TABLE_SQL)
         cur.execute(ACCOUNTS_TABLE_SQL)
 
-        # Backward compatibility for older DBs — add new columns if missing.
-        # These ALTERs are wrapped in try/except so they don't break if column already exists.
-
-        # Ensure voucher status columns exist
+        # Ensure company_id columns exist on older schemas
         try:
-            cur.execute("ALTER TABLE vouchers ADD COLUMN status TEXT NOT NULL DEFAULT 'draft';")
+            cur.execute("ALTER TABLE users ADD COLUMN company_id INTEGER;")
         except psycopg2.Error:
             pass
 
         try:
-            cur.execute("ALTER TABLE vouchers ADD COLUMN approved_by TEXT;")
+            cur.execute("ALTER TABLE vouchers ADD COLUMN company_id INTEGER;")
         except psycopg2.Error:
             pass
 
         try:
-            cur.execute("ALTER TABLE vouchers ADD COLUMN approved_at TIMESTAMPTZ;")
+            cur.execute("ALTER TABLE invoices ADD COLUMN company_id INTEGER;")
+        except psycopg2.Error:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE vendors ADD COLUMN company_id INTEGER;")
+        except psycopg2.Error:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE accounts ADD COLUMN company_id INTEGER;")
         except psycopg2.Error:
             pass
 
         conn.commit()
 
 
-# ------------------------
-# Audit logging
-# ------------------------
-
 def log_action(
-    username: str,
-    action: str,
-    entity: str,
-    ref: str | None = None,
-    details: str | None = None,
+    username,
+    action,
+    entity,
+    ref=None,
+    details=None,
 ) -> None:
     """
     Insert a row into audit_log.
@@ -222,7 +237,8 @@ def log_action(
                 """
                 INSERT INTO audit_log (ts, username, action, entity, ref, details)
                 VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s)
-                """,
+                """
+                ,
                 (username, action, entity, ref, details),
             )
             conn.commit()
