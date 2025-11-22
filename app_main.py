@@ -478,7 +478,8 @@ def main():
     )
     if st.sidebar.button("Logout"):
         st.session_state["user"] = None
-        st.experimental_rerun()
+        st.rerun()
+
 
     menu = ["Vouchers", "Invoices", "CRM", "Account"]
 
