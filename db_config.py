@@ -3,32 +3,43 @@
 
 import os
 from contextlib import closing
-from datetime import datetime
 
 import psycopg2
 from psycopg2.extras import DictCursor
 
 
 # ------------------------
-# Connection + utilities
+# DSN resolution
 # ------------------------
 
 def get_db_dsn() -> str:
     """
-    Resolve the PostgreSQL DSN from environment variables.
+    Resolve the PostgreSQL DSN.
 
-    Tries, in order:
-    - DATABASE_URL
-    - DB_DSN
-    - DB_URL
-    - POSTGRES_DSN
+    Priority:
+    1. st.secrets["DATABASE_URL"]  (Streamlit Cloud / local secrets.toml)
+    2. Env vars: DATABASE_URL, DB_DSN, DB_URL, POSTGRES_DSN
     """
+    # 1) Try Streamlit secrets (if Streamlit is available)
+    try:
+        import streamlit as st  # local import to avoid hard dependency in non-streamlit contexts
+
+        if "DATABASE_URL" in st.secrets:
+            dsn = st.secrets["DATABASE_URL"]
+            if dsn:
+                return dsn
+    except Exception:
+        # Either streamlit not installed yet or no secrets configured
+        pass
+
+    # 2) Try environment variables
     for name in ("DATABASE_URL", "DB_DSN", "DB_URL", "POSTGRES_DSN"):
         dsn = os.getenv(name)
         if dsn:
             return dsn
+
     raise RuntimeError(
-        "No database DSN found. Please set DATABASE_URL or DB_DSN (or DB_URL / POSTGRES_DSN)."
+        "No database DSN found. Set DATABASE_URL either in Streamlit secrets or as an environment variable."
     )
 
 
