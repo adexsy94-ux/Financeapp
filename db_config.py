@@ -177,7 +177,8 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 def init_schema():
     """
-    Create all required tables if they don't exist.
+    Create all required tables if they don't exist AND
+    backfill missing columns on older databases.
     """
 
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
@@ -191,7 +192,7 @@ def init_schema():
         cur.execute(VENDORS_TABLE_SQL)
         cur.execute(ACCOUNTS_TABLE_SQL)
 
-        # Backfill company_id on existing schemas
+        # ---- Backfill company_id on older schemas ----
         try:
             cur.execute("ALTER TABLE users ADD COLUMN company_id INTEGER;")
         except psycopg2.Error:
@@ -214,6 +215,28 @@ def init_schema():
 
         try:
             cur.execute("ALTER TABLE accounts ADD COLUMN company_id INTEGER;")
+        except psycopg2.Error:
+            pass
+
+        # ---- Backfill auth permission columns on older 'users' table ----
+        # IMPORTANT: we do NOT use NOT NULL here so it works with existing rows.
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user';")
+        except psycopg2.Error:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN can_create_voucher BOOLEAN DEFAULT TRUE;")
+        except psycopg2.Error:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN can_approve_voucher BOOLEAN DEFAULT FALSE;")
+        except psycopg2.Error:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN can_manage_users BOOLEAN DEFAULT FALSE;")
         except psycopg2.Error:
             pass
 
