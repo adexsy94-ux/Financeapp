@@ -267,7 +267,7 @@ def require_login():
             else:
                 st.session_state["user"] = u
                 st.success("Login successful.")
-                st.experimental_rerun()
+                st.rerun()
 
     # REGISTER COMPANY TAB
     with tab_register:
