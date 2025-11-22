@@ -29,7 +29,6 @@ from crm_gateway import (
 from vouchers_module import list_vouchers, create_voucher, change_voucher_status
 from invoices_module import list_invoices, create_invoice
 from pdf_utils import build_voucher_pdf_bytes
-from reporting_utils import money
 
 
 # -------------------
@@ -292,7 +291,10 @@ def app_invoices():
     idf = pd.DataFrame(list_invoices(company_id=company_id))
     if not idf.empty:
         if "total_amount" in idf.columns:
-            idf["total_amount_fmt"] = idf["total_amount"].apply(money)
+            # simple in-place money formatting so we don't depend on reporting_utils.money
+            idf["total_amount_fmt"] = idf["total_amount"].apply(
+                lambda v: f"{v:,.2f}" if v is not None else ""
+            )
         st.dataframe(idf)
     else:
         st.info("No invoices yet.")
