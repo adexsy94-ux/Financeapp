@@ -1,5 +1,5 @@
 # db_config.py
-# Database connection, schema initialization, and audit helpers (multi-tenant)
+# Multi-tenant database config, schema initialization, and audit logging.
 
 import os
 from contextlib import closing
@@ -10,20 +10,13 @@ from psycopg2.extras import DictCursor
 
 
 # ------------------------
-# Connection
+# Connection + utilities
 # ------------------------
 
 def get_db_dsn() -> str:
     """
-    Get the Postgres DSN.
-
-    Priority:
-    1. Environment / secrets: VOUCHER_DB_URL (recommended)
-    2. Fallback: DATABASE_URL (if you ever use that name)
-
-    You MUST set at least VOUCHER_DB_URL in:
-      - Streamlit Cloud secrets, or
-      - Your local environment.
+    Get the Postgres DSN for the finance app.
+    Uses VOUCHER_DB_URL (recommended) or DATABASE_URL as fallback.
     """
     dsn = os.getenv("VOUCHER_DB_URL") or os.getenv("DATABASE_URL")
     if not dsn:
@@ -33,8 +26,7 @@ def get_db_dsn() -> str:
 
 def connect():
     """
-    Return a psycopg2 connection using DictCursor for convenience.
-    Caller is responsible for closing.
+    Return a psycopg2 connection using DictCursor.
     """
     dsn = get_db_dsn()
     return psycopg2.connect(dsn, cursor_factory=DictCursor)
@@ -45,7 +37,7 @@ def now_iso() -> str:
 
 
 # ------------------------
-# Schema (CREATE TABLE statements)
+# Table DDLs
 # ------------------------
 
 COMPANIES_TABLE_SQL = """
@@ -76,80 +68,6 @@ CREATE TABLE IF NOT EXISTS users (
 );
 """
 
-VOUCHER_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS vouchers (
-    id              SERIAL PRIMARY KEY,
-    parent_id       INTEGER,
-    version         INTEGER DEFAULT 1,
-    company_id      INTEGER REFERENCES companies(id),
-    voucher_number  TEXT,
-    vendor          TEXT,
-    requester       TEXT,
-    invoice         TEXT,
-    file_name       TEXT,
-    file_data       BYTEA,
-    last_modified   TIMESTAMPTZ,
-    status          TEXT NOT NULL DEFAULT 'draft',  -- draft / submitted / approved / rejected
-    approved_by     TEXT,
-    approved_at     TIMESTAMPTZ
-);
-"""
-
-VOUCHER_LINES_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS voucher_lines (
-    id              SERIAL PRIMARY KEY,
-    voucher_id      INTEGER,
-    description     TEXT,
-    amount          NUMERIC,
-    expense_account TEXT,
-    vat_percent     NUMERIC,
-    wht_percent     NUMERIC,
-    vat_value       NUMERIC,
-    wht_value       NUMERIC,
-    total           NUMERIC
-);
-"""
-
-INVOICE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS invoices (
-    id                      SERIAL PRIMARY KEY,
-    parent_id               INTEGER,
-    version                 INTEGER DEFAULT 1,
-    company_id              INTEGER REFERENCES companies(id),
-    invoice_number          TEXT,
-    vendor_invoice_number   TEXT,
-    vendor                  TEXT,
-    summary                 TEXT,
-    vatable_amount          NUMERIC DEFAULT 0.0,
-    vat_rate                NUMERIC DEFAULT 0.0,
-    wht_rate                NUMERIC DEFAULT 0.0,
-    vat_amount              NUMERIC DEFAULT 0.0,
-    wht_amount              NUMERIC DEFAULT 0.0,
-    non_vatable_amount      NUMERIC DEFAULT 0.0,
-    subtotal                NUMERIC DEFAULT 0.0,
-    total_amount            NUMERIC DEFAULT 0.0,
-    terms                   TEXT,
-    last_modified           TIMESTAMPTZ,
-    payable_account         TEXT,
-    expense_asset_account   TEXT,
-    currency                TEXT DEFAULT 'NGN',
-    file_name               TEXT,
-    file_data               BYTEA
-);
-"""
-
-AUDIT_LOG_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS audit_log (
-    id          SERIAL PRIMARY KEY,
-    ts          TIMESTAMPTZ,
-    username    TEXT,
-    action      TEXT,
-    entity      TEXT,
-    ref         TEXT,
-    details     TEXT
-);
-"""
-
 VENDORS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS vendors (
     id              SERIAL PRIMARY KEY,
@@ -159,6 +77,21 @@ CREATE TABLE IF NOT EXISTS vendors (
     bank_name       TEXT,
     bank_account    TEXT,
     notes           TEXT,
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (company_id, lower(name))
+);
+"""
+
+STAFF_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS staff (
+    id              SERIAL PRIMARY KEY,
+    company_id      INTEGER REFERENCES companies(id),
+    first_name      TEXT NOT NULL,
+    last_name       TEXT NOT NULL,
+    email           TEXT,
+    phone           TEXT,
+    status          TEXT NOT NULL DEFAULT 'Active', -- Active / Inactive
+    position        TEXT,
     created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -169,93 +102,169 @@ CREATE TABLE IF NOT EXISTS accounts (
     company_id      INTEGER REFERENCES companies(id),
     code            TEXT NOT NULL,
     name            TEXT NOT NULL,
-    type            TEXT NOT NULL, -- 'payable', 'expense', 'asset', etc.
-    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    type            TEXT NOT NULL, -- 'Asset', 'Liability', 'Equity', 'Income', 'Expense'
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (company_id, code)
+);
+"""
+
+VOUCHER_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS vouchers (
+    id              SERIAL PRIMARY KEY,
+    parent_id       INTEGER,
+    version         INTEGER DEFAULT 1,
+    company_id      INTEGER REFERENCES companies(id),
+
+    voucher_number  TEXT NOT NULL,
+    vendor          TEXT,
+    requester       TEXT,
+    invoice_ref     TEXT,
+
+    currency        TEXT DEFAULT 'NGN',
+    status          TEXT NOT NULL DEFAULT 'draft',  -- draft / submitted / approved / rejected
+
+    file_name       TEXT,
+    file_data       BYTEA,
+
+    last_modified   TIMESTAMPTZ,
+    approved_by     TEXT,
+    approved_at     TIMESTAMPTZ,
+
+    UNIQUE (company_id, voucher_number, version)
+);
+"""
+
+VOUCHER_LINES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS voucher_lines (
+    id              SERIAL PRIMARY KEY,
+    voucher_id      INTEGER REFERENCES vouchers(id) ON DELETE CASCADE,
+    company_id      INTEGER REFERENCES companies(id),
+
+    line_no         INTEGER,
+    description     TEXT,
+    amount          NUMERIC(18,2),
+    account_name    TEXT,           -- from accounts.name
+    vat_percent     NUMERIC(5,2),
+    wht_percent     NUMERIC(5,2),
+    vat_value       NUMERIC(18,2),
+    wht_value       NUMERIC(18,2),
+    total           NUMERIC(18,2)
+);
+"""
+
+VOUCHER_DOCS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS voucher_documents (
+    id              SERIAL PRIMARY KEY,
+    voucher_id      INTEGER REFERENCES vouchers(id) ON DELETE CASCADE,
+    company_id      INTEGER REFERENCES companies(id),
+
+    file_name       TEXT NOT NULL,
+    file_data       BYTEA NOT NULL,
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (voucher_id, file_name)
+);
+"""
+
+INVOICE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS invoices (
+    id                      SERIAL PRIMARY KEY,
+    parent_id               INTEGER,
+    version                 INTEGER DEFAULT 1,
+    company_id              INTEGER REFERENCES companies(id),
+
+    invoice_number          TEXT NOT NULL,
+    vendor_invoice_number   TEXT,
+    vendor                  TEXT,
+    summary                 TEXT,
+
+    vatable_amount          NUMERIC(18,2) DEFAULT 0.0,
+    non_vatable_amount      NUMERIC(18,2) DEFAULT 0.0,
+    vat_rate                NUMERIC(5,2) DEFAULT 0.0,
+    wht_rate                NUMERIC(5,2) DEFAULT 0.0,
+    vat_amount              NUMERIC(18,2) DEFAULT 0.0,
+    wht_amount              NUMERIC(18,2) DEFAULT 0.0,
+    subtotal                NUMERIC(18,2) DEFAULT 0.0,
+    total_amount            NUMERIC(18,2) DEFAULT 0.0,
+
+    terms                   TEXT,
+    payable_account         TEXT,
+    expense_asset_account   TEXT,
+    currency                TEXT DEFAULT 'NGN',
+
+    file_name               TEXT,
+    file_data               BYTEA,
+
+    last_modified           TIMESTAMPTZ,
+
+    UNIQUE (company_id, invoice_number, version)
+);
+"""
+
+AUDIT_LOG_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          SERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ,
+    username    TEXT,
+    company_id  INTEGER,
+    action      TEXT,
+    entity      TEXT,
+    ref         TEXT,
+    details     TEXT
 );
 """
 
 
+# ------------------------
+# Schema init + migrations
+# ------------------------
+
 def init_schema():
     """
-    Create all required tables if they don't exist AND
-    backfill missing columns on older databases.
+    Create all tables if they do not exist.
+    Also try to add missing columns for older DBs (best-effort).
     """
-
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        # Base tables
+        # Base entities
         cur.execute(COMPANIES_TABLE_SQL)
         cur.execute(AUTH_TABLE_SQL)
+        cur.execute(VENDORS_TABLE_SQL)
+        cur.execute(STAFF_TABLE_SQL)
+        cur.execute(ACCOUNTS_TABLE_SQL)
         cur.execute(VOUCHER_TABLE_SQL)
         cur.execute(VOUCHER_LINES_TABLE_SQL)
+        cur.execute(VOUCHER_DOCS_TABLE_SQL)
         cur.execute(INVOICE_TABLE_SQL)
         cur.execute(AUDIT_LOG_TABLE_SQL)
-        cur.execute(VENDORS_TABLE_SQL)
-        cur.execute(ACCOUNTS_TABLE_SQL)
 
-        # ---- Backfill company_id on older schemas ----
-        try:
-            cur.execute("ALTER TABLE users ADD COLUMN company_id INTEGER;")
-        except psycopg2.Error:
-            pass
-
-        try:
-            cur.execute("ALTER TABLE vouchers ADD COLUMN company_id INTEGER;")
-        except psycopg2.Error:
-            pass
-
-        try:
-            cur.execute("ALTER TABLE invoices ADD COLUMN company_id INTEGER;")
-        except psycopg2.Error:
-            pass
-
-        try:
-            cur.execute("ALTER TABLE vendors ADD COLUMN company_id INTEGER;")
-        except psycopg2.Error:
-            pass
-
-        try:
-            cur.execute("ALTER TABLE accounts ADD COLUMN company_id INTEGER;")
-        except psycopg2.Error:
-            pass
-
-        # ---- Backfill auth permission columns on older 'users' table ----
-        # IMPORTANT: we do NOT use NOT NULL here so it works with existing rows.
-        try:
-            cur.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user';")
-        except psycopg2.Error:
-            pass
-
-        try:
-            cur.execute("ALTER TABLE users ADD COLUMN can_create_voucher BOOLEAN DEFAULT TRUE;")
-        except psycopg2.Error:
-            pass
-
-        try:
-            cur.execute("ALTER TABLE users ADD COLUMN can_approve_voucher BOOLEAN DEFAULT FALSE;")
-        except psycopg2.Error:
-            pass
-
-        try:
-            cur.execute("ALTER TABLE users ADD COLUMN can_manage_users BOOLEAN DEFAULT FALSE;")
-        except psycopg2.Error:
-            pass
+        # Backfill auth columns if missing
+        for alter in (
+            "ALTER TABLE users ADD COLUMN company_id INTEGER;",
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';",
+            "ALTER TABLE users ADD COLUMN can_create_voucher BOOLEAN NOT NULL DEFAULT TRUE;",
+            "ALTER TABLE users ADD COLUMN can_approve_voucher BOOLEAN NOT NULL DEFAULT FALSE;",
+            "ALTER TABLE users ADD COLUMN can_manage_users BOOLEAN NOT NULL DEFAULT FALSE;",
+        ):
+            try:
+                cur.execute(alter)
+            except Exception:
+                pass
 
         conn.commit()
 
 
-def log_action(username, action, entity, ref=None, details=None):
+def log_action(username, action, entity, ref=None, details=None, company_id=None):
     """
     Insert a row into audit_log.
-    Non-blocking — errors are ignored.
+    Non-blocking – failures are swallowed.
     """
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
             cur.execute(
                 """
-                INSERT INTO audit_log (ts, username, action, entity, ref, details)
-                VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s)
+                INSERT INTO audit_log (ts, username, company_id, action, entity, ref, details)
+                VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s)
                 """,
-                (username, action, entity, ref, details),
+                (username, company_id, action, entity, ref, details),
             )
             conn.commit()
     except Exception:
