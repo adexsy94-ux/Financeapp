@@ -22,7 +22,7 @@ def get_db_dsn() -> str:
     """
     # 1) Try Streamlit secrets (if Streamlit is available)
     try:
-        import streamlit as st  # local import to avoid hard dependency in non-streamlit contexts
+        import streamlit as st  # local import
 
         if "DATABASE_URL" in st.secrets:
             dsn = st.secrets["DATABASE_URL"]
@@ -235,6 +235,7 @@ def init_schema() -> None:
     Safe to call on every startup.
     """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        # Base tables
         cur.execute(COMPANIES_TABLE_SQL)
         cur.execute(AUTH_TABLE_SQL)
         cur.execute(VENDORS_TABLE_SQL)
@@ -245,6 +246,12 @@ def init_schema() -> None:
         cur.execute(VOUCHER_DOCS_TABLE_SQL)
         cur.execute(INVOICE_TABLE_SQL)
         cur.execute(AUDIT_LOG_TABLE_SQL)
+
+        # --- Lightweight migrations for existing staff table ---
+        # In case staff was created earlier without these columns.
+        cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS status TEXT;")
+        cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS position TEXT;")
+
         conn.commit()
 
 
