@@ -6,7 +6,7 @@ from contextlib import closing
 from typing import Optional, Dict, List
 
 import streamlit as st
-
+import psycopg2
 from db_config import connect, AUTH_TABLE_SQL, COMPANIES_TABLE_SQL, log_action
 
 
@@ -76,7 +76,9 @@ def create_company_and_admin(
 ) -> Optional[str]:
     """
     Create a new company and its first admin user.
-    Returns error message or None on success.
+    Returns:
+      - None on success
+      - Error message (str) on failure (shown in Streamlit instead of crashing).
     """
     company_name = (company_name or "").strip()
     company_code_norm = (company_code or "").strip().lower()
@@ -105,10 +107,10 @@ def create_company_and_admin(
             try:
                 cur.execute(alter_sql)
             except Exception:
-                # If column already exists, we just ignore the error
+                # If column already exists or any other harmless error, ignore
                 pass
 
-        # Check if company exists
+        # Check if company already exists
         cur.execute(
             "SELECT id FROM companies WHERE lower(code) = %s",
             (company_code_norm,),
@@ -129,26 +131,34 @@ def create_company_and_admin(
         company_id = cur.fetchone()["id"]
 
         # Create admin user with role + permissions
-        cur.execute(
-            """
-            INSERT INTO users (
-                username,
-                password_hash,
-                company_id,
-                role,
-                can_create_voucher,
-                can_approve_voucher,
-                can_manage_users
+        try:
+            cur.execute(
+                """
+                INSERT INTO users (
+                    username,
+                    password_hash,
+                    company_id,
+                    role,
+                    can_create_voucher,
+                    can_approve_voucher,
+                    can_manage_users
+                )
+                VALUES (%s, %s, %s, %s, TRUE, TRUE, TRUE)
+                """,
+                (
+                    admin_username_norm,
+                    pw_hash,
+                    company_id,
+                    "admin",
+                ),
             )
-            VALUES (%s, %s, %s, %s, TRUE, TRUE, TRUE)
-            """,
-            (
-                admin_username_norm,
-                pw_hash,
-                company_id,
-                "admin",
-            ),
-        )
+        except psycopg2.errors.UniqueViolation:
+            # Username already exists (old global unique constraint or same username reused)
+            conn.rollback()
+            return "A user with this username already exists. Please choose a different admin username."
+        except Exception as ex:
+            conn.rollback()
+            return f"Error creating admin user: {ex}"
 
         conn.commit()
 
