@@ -1,13 +1,19 @@
 # auth_module.py
-# Authentication + multi-tenant user management (companies + users)
+# Multi-tenant authentication, company registration, and user management.
 
 import hashlib
 from contextlib import closing
 from typing import Optional, Dict, List
 
-import streamlit as st
 import psycopg2
-from db_config import connect, AUTH_TABLE_SQL, COMPANIES_TABLE_SQL, log_action
+import streamlit as st
+
+from db_config import (
+    connect,
+    COMPANIES_TABLE_SQL,
+    AUTH_TABLE_SQL,
+    log_action,
+)
 
 
 def _hash_password(password: str) -> str:
@@ -15,57 +21,24 @@ def _hash_password(password: str) -> str:
 
 
 # ------------------------
-# Init helper (what app_main imports)
+# Init helper for app_main
 # ------------------------
 
 def init_auth():
     """
-    Ensure the users table exists.
-
-    Kept mainly for backward compatibility with app_main imports:
-    from auth_module import init_auth, ...
+    Ensure auth tables exist.
     """
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            cur.execute(COMPANIES_TABLE_SQL)
             cur.execute(AUTH_TABLE_SQL)
             conn.commit()
     except Exception:
-        # Don't crash app startup if this fails
         pass
 
 
 # ------------------------
-# Company Lookup
-# ------------------------
-
-def get_company_by_code(code: str) -> Optional[Dict]:
-    code_norm = (code or "").strip().lower()
-    if not code_norm:
-        return None
-
-    with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT id, name, code
-            FROM companies
-            WHERE lower(code) = %s
-            """,
-            (code_norm,),
-        )
-        row = cur.fetchone()
-
-    if not row:
-        return None
-
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "code": row["code"],
-    }
-
-
-# ------------------------
-# Create Company + First Admin
+# Company + first admin
 # ------------------------
 
 def create_company_and_admin(
@@ -76,9 +49,7 @@ def create_company_and_admin(
 ) -> Optional[str]:
     """
     Create a new company and its first admin user.
-    Returns:
-      - None on success
-      - Error message (str) on failure (shown in Streamlit instead of crashing).
+    Returns None on success or error message on failure.
     """
     company_name = (company_name or "").strip()
     company_code_norm = (company_code or "").strip().lower()
@@ -92,25 +63,24 @@ def create_company_and_admin(
     pw_hash = _hash_password(admin_password)
 
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        # Ensure companies and users tables exist
+        # Ensure tables exist
         cur.execute(COMPANIES_TABLE_SQL)
         cur.execute(AUTH_TABLE_SQL)
 
-        # --- HARDENED MIGRATION: make sure new columns exist on existing users table ---
-        # This is specifically to fix "column \"role\" of relation \"users\" does not exist"
+        # Hardened migration to guarantee new columns on existing DBs
         for alter_sql in (
             "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user';",
             "ALTER TABLE users ADD COLUMN can_create_voucher BOOLEAN DEFAULT TRUE;",
             "ALTER TABLE users ADD COLUMN can_approve_voucher BOOLEAN DEFAULT FALSE;",
             "ALTER TABLE users ADD COLUMN can_manage_users BOOLEAN DEFAULT FALSE;",
+            "ALTER TABLE users ADD COLUMN company_id INTEGER;",
         ):
             try:
                 cur.execute(alter_sql)
             except Exception:
-                # If column already exists or any other harmless error, ignore
                 pass
 
-        # Check if company already exists
+        # Check company code uniqueness
         cur.execute(
             "SELECT id FROM companies WHERE lower(code) = %s",
             (company_code_norm,),
@@ -130,7 +100,7 @@ def create_company_and_admin(
         )
         company_id = cur.fetchone()["id"]
 
-        # Create admin user with role + permissions
+        # Create admin user
         try:
             cur.execute(
                 """
@@ -153,7 +123,6 @@ def create_company_and_admin(
                 ),
             )
         except psycopg2.errors.UniqueViolation:
-            # Username already exists (old global unique constraint or same username reused)
             conn.rollback()
             return "A user with this username already exists. Please choose a different admin username."
         except Exception as ex:
@@ -168,20 +137,20 @@ def create_company_and_admin(
         "companies",
         ref=str(company_id),
         details=f"company_code={company_code_norm}",
+        company_id=company_id,
     )
 
     return None
 
 
 # ------------------------
-# Login
+# Login & session
 # ------------------------
-
 
 def verify_user(company_code: str, username: str, password: str) -> Optional[Dict]:
     """
     Verify that a username/password exists for a given company code.
-    Returns a dict with user + company info on success, None otherwise.
+    Returns a dict with user & company info on success, or None.
     """
     company_code_norm = (company_code or "").strip().lower()
     username_norm = (username or "").strip().lower()
@@ -190,9 +159,6 @@ def verify_user(company_code: str, username: str, password: str) -> Optional[Dic
         return None
 
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        # At this point the DB schema should already be migrated
-        # (columns role, can_create_voucher, can_approve_voucher, can_manage_users exist),
-        # so we just run the SELECT.
         cur.execute(
             """
             SELECT
@@ -218,8 +184,7 @@ def verify_user(company_code: str, username: str, password: str) -> Optional[Dic
     if not row:
         return None
 
-    stored_hash = row["password_hash"]
-    if stored_hash != _hash_password(password):
+    if row["password_hash"] != _hash_password(password):
         return None
 
     return {
@@ -235,10 +200,6 @@ def verify_user(company_code: str, username: str, password: str) -> Optional[Dic
     }
 
 
-# ------------------------
-# Auth Helpers
-# ------------------------
-
 def current_user() -> Optional[Dict]:
     return st.session_state.get("user")
 
@@ -250,7 +211,7 @@ def require_login():
     if current_user() is not None:
         return
 
-    st.markdown("<h2>VoucherPro Login</h2>", unsafe_allow_html=True)
+    st.markdown("<h2>FinanceApp Login</h2>", unsafe_allow_html=True)
 
     tab_login, tab_register = st.tabs(["Login", "Register Company"])
 
@@ -305,11 +266,6 @@ def require_admin():
 
 
 def require_permission(permission_flag: str):
-    """
-    Example: require_permission("can_create_voucher"),
-             require_permission("can_approve_voucher"),
-             require_permission("can_manage_users").
-    """
     user = current_user()
     if not user:
         require_login()
@@ -324,9 +280,6 @@ def require_permission(permission_flag: str):
 # ------------------------
 
 def list_users(company_id: int) -> List[Dict]:
-    """
-    List all users for the given company.
-    """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """
@@ -342,7 +295,6 @@ def list_users(company_id: int) -> List[Dict]:
             (company_id,),
         )
         rows = cur.fetchall()
-
     return [dict(r) for r in rows]
 
 
@@ -356,10 +308,6 @@ def create_user_for_company(
     can_manage_users: bool,
     actor_username: str,
 ) -> Optional[str]:
-    """
-    Create a new user inside a company.
-    Returns error message or None on success.
-    """
     username_norm = (username or "").strip().lower()
     if not username_norm or not password:
         return "Username and password required."
@@ -402,9 +350,9 @@ def create_user_for_company(
             "users",
             ref=username_norm,
             details=f"company_id={company_id}, role={role}",
+            company_id=company_id,
         )
         return None
-
     except Exception as e:
         return f"Error creating user: {e}"
 
@@ -418,9 +366,6 @@ def update_user_permissions(
     can_approve_voucher: bool,
     can_manage_users: bool,
 ) -> Optional[str]:
-    """
-    Update role + permission flags for a user.
-    """
     if role not in ("user", "admin"):
         return "Invalid role."
 
@@ -452,59 +397,9 @@ def update_user_permissions(
             "update_user_permissions",
             "users",
             ref=str(user_id),
-            details=f"company_id={company_id}, role={role}, "
-                    f"create={can_create_voucher}, approve={can_approve_voucher}, "
-                    f"manage_users={can_manage_users}",
+            details=f"company_id={company_id}, role={role}",
+            company_id=company_id,
         )
         return None
-
     except Exception as e:
         return f"Error updating permissions: {e}"
-
-
-def change_password(company_id: int, username: str, old_password: str, new_password: str) -> Optional[str]:
-    """
-    Change password for a user in a given company.
-    """
-    username_norm = (username or "").strip().lower()
-    if not username_norm or not old_password or not new_password:
-        return "All fields required."
-
-    with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT u.id, u.password_hash
-            FROM users u
-            WHERE u.company_id = %s
-              AND lower(u.username) = %s
-            """,
-            (company_id, username_norm),
-        )
-        row = cur.fetchone()
-
-    if not row:
-        return "User not found."
-
-    if row["password_hash"] != _hash_password(old_password):
-        return "Old password incorrect."
-
-    new_hash = _hash_password(new_password)
-
-    try:
-        with closing(connect()) as conn, closing(conn.cursor()) as cur:
-            cur.execute(
-                """
-                UPDATE users
-                SET password_hash = %s
-                WHERE id = %s
-                  AND company_id = %s
-                """,
-                (new_hash, row["id"], company_id),
-            )
-            conn.commit()
-
-        log_action(username_norm, "change_password", "users", ref=str(row["id"]))
-        return None
-
-    except Exception as e:
-        return f"Error changing password: {e}"
