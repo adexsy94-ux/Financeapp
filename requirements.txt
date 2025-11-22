@@ -1,5 +1,9 @@
-streamlit>=1.39.0
-psycopg2-binary>=2.9.9
-pandas>=2.2.0
-openpyxl>=3.1.0
-reportlab>=4.2.0
+financeapp/
+    app_main.py
+    auth_module.py
+    crm_gateway.py
+    db_config.py
+    vouchers_module.py
+    invoices_module.py
+    pdf_utils.py
+    reporting_utils.py
