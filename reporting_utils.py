@@ -18,9 +18,6 @@ def money(x) -> str:
 
 
 def excel_download_link_multi(sheets: Dict[str, pd.DataFrame], filename: str = "export.xlsx") -> str:
-    """
-    Create a single Excel file with multiple sheets and return HTML download link.
-    """
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for sheet_name, df in sheets.items():
