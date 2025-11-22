@@ -1,5 +1,5 @@
 # invoices_module.py
-# Invoice CRUD and queries
+# Invoice CRUD and queries (multi-tenant)
 
 from contextlib import closing
 from typing import List, Dict, Optional
@@ -7,32 +7,35 @@ from typing import List, Dict, Optional
 from db_config import connect, log_action
 
 
-def list_invoices(limit: int = 100) -> List[Dict]:
+def list_invoices(company_id: int, limit: int = 100) -> List[Dict]:
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """
             SELECT *
             FROM invoices
+            WHERE company_id = %s
             ORDER BY id DESC
             LIMIT %s
-            """,
-            (limit,),
+            """
+            ,
+            (company_id, limit),
         )
         rows = cur.fetchall()
     return [dict(r) for r in rows]
 
 
-def get_invoice(invoice_id: int) -> Optional[Dict]:
+def get_invoice(company_id: int, invoice_id: int) -> Optional[Dict]:
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
-            "SELECT * FROM invoices WHERE id = %s",
-            (invoice_id,),
+            "SELECT * FROM invoices WHERE id = %s AND company_id = %s",
+            (invoice_id, company_id),
         )
         row = cur.fetchone()
     return dict(row) if row else None
 
 
 def create_invoice(
+    company_id: int,
     invoice_number: str,
     vendor_invoice_number: str,
     vendor: str,
@@ -58,6 +61,7 @@ def create_invoice(
         cur.execute(
             """
             INSERT INTO invoices (
+                company_id,
                 invoice_number, vendor_invoice_number, vendor, summary,
                 vatable_amount, vat_rate, wht_rate,
                 vat_amount, wht_amount,
@@ -67,6 +71,7 @@ def create_invoice(
                 currency, file_name, file_data
             )
             VALUES (
+                %s,
                 %s, %s, %s, %s,
                 %s, %s, %s,
                 %s, %s,
@@ -76,8 +81,10 @@ def create_invoice(
                 %s, %s, %s
             )
             RETURNING id
-            """,
+            """
+            ,
             (
+                company_id,
                 invoice_number,
                 vendor_invoice_number,
                 vendor,
@@ -101,5 +108,6 @@ def create_invoice(
         iid = cur.fetchone()["id"]
         conn.commit()
 
-    log_action(username, "create_invoice", "invoices", ref=str(iid))
+    log_action(username, "create_invoice", "invoices", ref=str(iid),
+               details=f"company_id={company_id}")
     return iid
