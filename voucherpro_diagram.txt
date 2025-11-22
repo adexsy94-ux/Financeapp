@@ -1,0 +1,68 @@
+VoucherPro – Module Diagram (Text Version)
+
+[PostgreSQL Database]
+    ├── users
+    ├── vouchers
+    ├── voucher_lines
+    ├── invoices
+    ├── vendors
+    ├── accounts
+    └── audit_log
+
+[db_config.py]
+    ├── connect()
+    ├── init_schema()
+    └── log_action()
+
+[auth_module.py]
+    ├── create_user()
+    ├── verify_user()
+    ├── get_user_record()
+    ├── list_users()
+    ├── update_user_permissions()
+    ├── current_user()
+    ├── require_login()
+    ├── require_admin()
+    └── require_permission()
+
+[crm_gateway.py]
+    ├── list_vendors()
+    ├── upsert_vendor()
+    ├── list_accounts(type)
+    └── upsert_account()
+
+[vouchers_module.py]
+    ├── list_vouchers()
+    ├── get_voucher()
+    ├── list_voucher_lines()
+    └── create_voucher()
+
+[invoices_module.py]
+    ├── list_invoices()
+    ├── get_invoice()
+    └── create_invoice()
+
+[pdf_utils.py]
+    └── build_voucher_pdf_bytes(voucher_id)
+
+[reporting_utils.py]
+    ├── money(x)
+    └── excel_download_link_multi()
+
+[app_main.py]  (Streamlit UI)
+    ├── app_vouchers()
+    ├── app_invoices()
+    ├── app_crm()
+    ├── app_user_management()
+    ├── app_db_browser()
+    └── main()
+
+Data Flow (simplified):
+
+User ──> Streamlit UI (app_main.py)
+           ├── Auth via auth_module -> db_config -> PostgreSQL (users)
+           ├── Vouchers via vouchers_module -> db_config -> PostgreSQL (vouchers, voucher_lines)
+           ├── Invoices via invoices_module -> db_config -> PostgreSQL (invoices)
+           ├── CRM via crm_gateway -> db_config -> PostgreSQL (vendors, accounts)
+           ├── PDF export via pdf_utils -> vouchers_module
+           └── Audit logging via db_config.log_action() -> PostgreSQL (audit_log)
