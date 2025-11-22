@@ -1,5 +1,5 @@
 # pdf_utils.py
-# Simple PDF generation for vouchers
+# Simple PDF generation for vouchers (multi-tenant safe)
 
 from io import BytesIO
 
@@ -12,11 +12,8 @@ from reportlab.platypus import Table, TableStyle
 from vouchers_module import list_voucher_lines, get_voucher
 
 
-def build_voucher_pdf_bytes(voucher_id: int) -> bytes:
-    """
-    Very simple voucher PDF: header + basic details + lines table.
-    """
-    v = get_voucher(voucher_id)
+def build_voucher_pdf_bytes(company_id: int, voucher_id: int) -> bytes:
+    v = get_voucher(company_id, voucher_id)
     if not v:
         raise ValueError("Voucher not found")
 
@@ -41,7 +38,6 @@ def build_voucher_pdf_bytes(voucher_id: int) -> bytes:
     c.drawString(20 * mm, y, f"Invoice: {v.get('invoice') or ''}")
     y -= 12 * mm
 
-    # Lines table
     data = [["Description", "Amount", "Expense Account", "VAT", "WHT", "Total"]]
     total_sum = 0.0
     for line in lines:
