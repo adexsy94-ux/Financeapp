@@ -174,14 +174,14 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 """
 
+
 def init_schema():
     """
     Create all required tables if they don't exist.
-    Also attempts to backfill new columns on existing tables.
-    Call this once at app startup.
     """
+
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        # Base tables in safe order (companies first)
+        # Base tables
         cur.execute(COMPANIES_TABLE_SQL)
         cur.execute(AUTH_TABLE_SQL)
         cur.execute(VOUCHER_TABLE_SQL)
@@ -191,7 +191,7 @@ def init_schema():
         cur.execute(VENDORS_TABLE_SQL)
         cur.execute(ACCOUNTS_TABLE_SQL)
 
-        # Ensure company_id columns exist on older schemas
+        # Backfill company_id on existing schemas
         try:
             cur.execute("ALTER TABLE users ADD COLUMN company_id INTEGER;")
         except psycopg2.Error:
@@ -220,16 +220,10 @@ def init_schema():
         conn.commit()
 
 
-def log_action(
-    username,
-    action,
-    entity,
-    ref=None,
-    details=None,
-) -> None:
+def log_action(username, action, entity, ref=None, details=None):
     """
     Insert a row into audit_log.
-    This should NEVER crash the whole app: errors are swallowed.
+    Non-blocking — errors are ignored.
     """
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
@@ -237,11 +231,9 @@ def log_action(
                 """
                 INSERT INTO audit_log (ts, username, action, entity, ref, details)
                 VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s)
-                """
-                ,
+                """,
                 (username, action, entity, ref, details),
             )
             conn.commit()
     except Exception:
-        # Do not let logging failures kill the request.
         pass
