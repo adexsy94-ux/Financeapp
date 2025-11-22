@@ -1,5 +1,5 @@
 # app_main.py
-# Main Streamlit app wiring all modules together, with user management and approvals
+# Main Streamlit app wiring all modules together, with multi-tenant support
 
 import streamlit as st
 import pandas as pd
@@ -14,21 +14,21 @@ from auth_module import (
     current_user,
     list_users,
     update_user_permissions,
-    create_user,
-    get_user_record,
+    create_user_for_company,
     change_password,
 )
 from crm_gateway import list_vendors, upsert_vendor, list_accounts, upsert_account
 from vouchers_module import list_vouchers, create_voucher, update_voucher_status
 from invoices_module import list_invoices, create_invoice
 from pdf_utils import build_voucher_pdf_bytes
-from reporting_utils import money, excel_download_link_multi
+from reporting_utils import money
 
 
 def app_vouchers():
     require_permission("can_create_voucher")
     user = current_user()
     username = user["username"]
+    company_id = user["company_id"]
 
     st.subheader("Create Voucher")
 
@@ -76,6 +76,7 @@ def app_vouchers():
             st.error("Voucher number is required.")
         else:
             vid = create_voucher(
+                company_id=company_id,
                 voucher_number=voucher_number,
                 vendor=vendor,
                 requester=requester,
@@ -90,9 +91,8 @@ def app_vouchers():
     st.markdown("---")
     st.subheader("Recent Vouchers")
 
-    vdf = pd.DataFrame(list_vouchers())
+    vdf = pd.DataFrame(list_vouchers(company_id=company_id))
     if not vdf.empty:
-        # Display status and basic info
         display_cols = [c for c in vdf.columns if c not in ("file_data",)]
         st.dataframe(vdf[display_cols])
 
@@ -121,7 +121,6 @@ def app_vouchers():
             elif action == "--":
                 st.error("Please select an action.")
             else:
-                # Permission check for approver actions
                 as_approver = False
                 new_status = None
 
@@ -142,6 +141,7 @@ def app_vouchers():
                     st.error("Unknown action.")
                 else:
                     err = update_voucher_status(
+                        company_id=company_id,
                         voucher_id=int(selected_id),
                         new_status=new_status,
                         actor_username=username,
@@ -157,7 +157,7 @@ def app_vouchers():
         pdf_id = st.number_input("Voucher ID to export", min_value=0, step=1, value=0, key="pdf_voucher_id")
         if pdf_id > 0 and st.button("Download Voucher PDF"):
             try:
-                pdf_bytes = build_voucher_pdf_bytes(int(pdf_id))
+                pdf_bytes = build_voucher_pdf_bytes(company_id=company_id, voucher_id=int(pdf_id))
                 st.download_button(
                     label="Download PDF",
                     data=pdf_bytes,
@@ -174,6 +174,7 @@ def app_invoices():
     require_permission("can_create_voucher")
     user = current_user()
     username = user["username"]
+    company_id = user["company_id"]
 
     st.subheader("Create Invoice")
 
@@ -205,6 +206,7 @@ def app_invoices():
             st.error("Invoice number is required.")
         else:
             iid = create_invoice(
+                company_id=company_id,
                 invoice_number=invoice_number,
                 vendor_invoice_number=vendor_invoice_number,
                 vendor=vendor,
@@ -225,7 +227,7 @@ def app_invoices():
 
     st.markdown("---")
     st.subheader("Recent Invoices")
-    idf = pd.DataFrame(list_invoices())
+    idf = pd.DataFrame(list_invoices(company_id=company_id))
     if not idf.empty:
         if "total_amount" in idf.columns:
             idf["total_amount_fmt"] = idf["total_amount"].apply(money)
@@ -238,6 +240,7 @@ def app_crm():
     require_permission("can_create_voucher")
     user = current_user()
     username = user["username"]
+    company_id = user["company_id"]
 
     st.subheader("Vendors")
 
@@ -253,6 +256,7 @@ def app_crm():
                 st.error("Vendor name is required.")
             else:
                 upsert_vendor(
+                    company_id=company_id,
                     name=name,
                     contact_person=contact,
                     bank_name=bank_name,
@@ -262,7 +266,7 @@ def app_crm():
                 )
                 st.success("Vendor saved.")
 
-    vdf = pd.DataFrame(list_vendors())
+    vdf = pd.DataFrame(list_vendors(company_id=company_id))
     if not vdf.empty:
         st.dataframe(vdf)
     else:
@@ -280,29 +284,35 @@ def app_crm():
             if not code or not name:
                 st.error("Code and name are required.")
             else:
-                upsert_account(code=code, name=name, account_type=acc_type, username=username)
+                upsert_account(
+                    company_id=company_id,
+                    code=code,
+                    name=name,
+                    account_type=acc_type,
+                    username=username,
+                )
                 st.success("Account saved.")
 
     st.markdown("**Payable Accounts**")
-    pdf = pd.DataFrame(list_accounts("payable"))
+    pdf = pd.DataFrame(list_accounts("payable", company_id=company_id))
     if not pdf.empty:
         st.dataframe(pdf)
 
     st.markdown("**Expense Accounts**")
-    exdf = pd.DataFrame(list_accounts("expense"))
+    exdf = pd.DataFrame(list_accounts("expense", company_id=company_id))
     if not exdf.empty:
         st.dataframe(exdf)
 
 
 def app_user_management():
-    """
-    Admin / power-user page for managing users and permissions.
-    """
     require_permission("can_manage_users")
     admin = current_user()
     admin_name = admin["username"]
+    company_id = admin["company_id"]
 
-    st.subheader("Create New User")
+    st.subheader(f"User Management – {admin['company_name']} ({admin['company_code']})")
+
+    st.markdown("### Create New User")
 
     with st.form("create_user_form"):
         new_username = st.text_input("Username")
@@ -331,32 +341,25 @@ def app_user_management():
             elif pw1 != pw2:
                 st.error("Passwords do not match.")
             else:
-                err = create_user(new_username, pw1, is_admin=(new_role == "admin"))
+                err = create_user_for_company(
+                    company_id=company_id,
+                    username=new_username,
+                    password=pw1,
+                    role=new_role,
+                    can_create_voucher=can_create_voucher,
+                    can_approve_voucher=can_approve_voucher,
+                    can_manage_users=can_manage_users,
+                    actor_username=admin_name,
+                )
                 if err:
                     st.error(err)
                 else:
-                    # Override default permissions with the chosen ones
-                    rec = get_user_record(new_username)
-                    if not rec:
-                        st.warning("User created, but could not reload user record.")
-                    else:
-                        uerr = update_user_permissions(
-                            actor_username=admin_name,
-                            user_id=rec["id"],
-                            role=new_role,
-                            can_create_voucher=can_create_voucher,
-                            can_approve_voucher=can_approve_voucher,
-                            can_manage_users=can_manage_users,
-                        )
-                        if uerr:
-                            st.error(uerr)
-                        else:
-                            st.success(f"User '{new_username}' created.")
+                    st.success(f"User '{new_username}' created.")
 
     st.markdown("---")
-    st.subheader("Existing Users")
+    st.markdown("### Existing Users")
 
-    users = list_users()
+    users = list_users(company_id=company_id)
     if not users:
         st.info("No users found.")
         return
@@ -395,6 +398,7 @@ def app_user_management():
                     err = update_user_permissions(
                         actor_username=admin_name,
                         user_id=u["id"],
+                        company_id=company_id,
                         role=role,
                         can_create_voucher=c_create,
                         can_approve_voucher=c_approve,
@@ -405,27 +409,18 @@ def app_user_management():
                     else:
                         st.success("Permissions updated.")
 
-                        # If this user is the one currently logged in, refresh their session permissions
-                        cur = current_user()
-                        if cur and cur["username"] == u["username"]:
-                            updated = get_user_record(u["username"])
-                            if updated:
-                                st.session_state["user"] = updated
-                                st.info("Your own permissions were updated; session refreshed.")
-
 
 def app_account():
-    """
-    Account page for the logged-in user to change password.
-    """
     require_login()
     user = current_user()
     username = user["username"]
+    company_id = user["company_id"]
 
     st.subheader("My Account")
 
     st.markdown(f"**Username:** {username}")
     st.markdown(f"**Role:** {user['role']}")
+    st.markdown(f"**Company:** {user['company_name']} ({user['company_code']})")
 
     st.markdown("---")
     st.subheader("Change Password")
@@ -441,7 +436,7 @@ def app_account():
             elif new_pw1 != new_pw2:
                 st.error("New passwords do not match.")
             else:
-                err = change_password(username, old_pw, new_pw1)
+                err = change_password(company_id, username, old_pw, new_pw1)
                 if err:
                     st.error(err)
                 else:
@@ -449,9 +444,6 @@ def app_account():
 
 
 def app_db_browser():
-    """
-    Very simple DB browser, admin-only.
-    """
     require_admin()
     st.subheader("DB Browser (admin only)")
 
@@ -468,31 +460,31 @@ def app_db_browser():
 
 
 def main():
-    st.set_page_config(page_title="VoucherPro", layout="wide")
+    st.set_page_config(page_title="VoucherPro – Multi-Company", layout="wide")
 
     if "user" not in st.session_state:
         st.session_state["user"] = None
 
-    # Init DB + auth
     init_schema()
     init_auth()
 
     require_login()
     user = current_user()
 
-    st.sidebar.markdown(f"**User:** {user['username']} (_{user['role']}_)")
+    st.sidebar.markdown(
+        f"**User:** {user['username']}  "
+        f"<br/>**Company:** {user['company_name']} ({user['company_code']})",
+        unsafe_allow_html=True,
+    )
     if st.sidebar.button("Logout"):
         st.session_state["user"] = None
         st.experimental_rerun()
 
-    # Navigation
     menu = ["Vouchers", "Invoices", "CRM", "Account"]
 
-    # User management visible to anyone with that permission
     if user.get("can_manage_users", False):
         menu.append("User Management")
 
-    # DB browser only for hard 'admin' role
     if user["role"] == "admin":
         menu.append("DB Browser")
 
