@@ -253,7 +253,9 @@ def app_vouchers():
     vendor = st.selectbox("Vendor (from CRM)", vendor_options)
     requester = st.selectbox("Requester (Staff in CRM)", requester_options)
 
-    # Link vouchers to invoices for this vendor
+    # -----------------------------
+    # Link voucher to invoice
+    # -----------------------------
     all_invoices = list_invoices(company_id=company_id)
     invoice_numbers_for_vendor = [
         row["invoice_number"]
@@ -292,26 +294,23 @@ def app_vouchers():
             st.warning(f"Could not load invoice allocations: {e}")
             allocation = None
 
-    # Balances we’ll use for validation
+    # Balances for validation
     actual_balance = None
     vat_balance = None
     wht_balance = None
 
-    # ---- Invoice allocation summary (amounts, paid, balances) ----
     if selected_invoice is not None and allocation is not None:
         inv_vatable = float(selected_invoice.get("vatable_amount") or 0.0)
         inv_non_vatable = float(selected_invoice.get("non_vatable_amount") or 0.0)
         inv_vat_total = float(selected_invoice.get("vat_amount") or 0.0)
         inv_wht_total = float(selected_invoice.get("wht_amount") or 0.0)
 
-        # Base (invoice) amount = vatable + non-vatable
         actual_total = inv_vatable + inv_non_vatable
 
         amount_paid = float(allocation.get("amount_paid") or 0.0)
         vat_paid = float(allocation.get("vat_paid") or 0.0)
         wht_paid = float(allocation.get("wht_paid") or 0.0)
 
-        # Balances
         actual_balance = actual_total - amount_paid
         vat_balance = inv_vat_total - vat_paid
         wht_balance = inv_wht_total - wht_paid
@@ -377,7 +376,9 @@ def app_vouchers():
 
         st.markdown("---")
 
-    # Determine default currency based on invoice or fallback
+    # -----------------------------
+    # Voucher main inputs
+    # -----------------------------
     currencies = ["NGN", "USD", "GBP", "EUR"]
     default_index = 0
     if invoice_currency in currencies:
@@ -426,32 +427,18 @@ def app_vouchers():
     # ---------------------------
     validation_errors = []
     if selected_invoice is not None and allocation is not None:
-        inv_vatable = float(selected_invoice.get("vatable_amount") or 0.0)
-        inv_non_vatable = float(selected_invoice.get("non_vatable_amount") or 0.0)
-        inv_vat_total = float(selected_invoice.get("vat_amount") or 0.0)
-        inv_wht_total = float(selected_invoice.get("wht_amount") or 0.0)
-
-        actual_total = inv_vatable + inv_non_vatable
-        amount_paid = float(allocation.get("amount_paid") or 0.0)
-        vat_paid = float(allocation.get("vat_paid") or 0.0)
-        wht_paid = float(allocation.get("wht_paid") or 0.0)
-
-        actual_balance = actual_total - amount_paid
-        vat_balance = inv_vat_total - vat_paid
-        wht_balance = inv_wht_total - wht_paid
-
-        # If user enters more than the available balance, pre-warn
-        if amount > actual_balance + 1e-6:
+        # Using the balances we already computed above
+        if amount > (actual_balance or 0) + 1e-6:
             validation_errors.append(
-                f"Base amount ({amount:,.2f}) is higher than the invoice base balance ({actual_balance:,.2f})."
+                f"Base amount ({amount:,.2f}) is higher than the invoice base balance ({(actual_balance or 0):,.2f})."
             )
-        if vat_amount > vat_balance + 1e-6:
+        if vat_amount > (vat_balance or 0) + 1e-6:
             validation_errors.append(
-                f"VAT amount ({vat_amount:,.2f}) is higher than the invoice VAT balance ({vat_balance:,.2f})."
+                f"VAT amount ({vat_amount:,.2f}) is higher than the invoice VAT balance ({(vat_balance or 0):,.2f})."
             )
-        if wht_amount > wht_balance + 1e-6:
+        if wht_amount > (wht_balance or 0) + 1e-6:
             validation_errors.append(
-                f"WHT amount ({wht_amount:,.2f}) is higher than the invoice WHT balance ({wht_balance:,.2f})."
+                f"WHT amount ({wht_amount:,.2f}) is higher than the invoice WHT balance ({(wht_balance or 0):,.2f})."
             )
 
     if validation_errors:
@@ -459,53 +446,64 @@ def app_vouchers():
         for err_msg in validation_errors:
             st.error(err_msg)
 
-    # ---- Save button (only actually saves if validation passes) ----
+    # ---------------------------
+    # Save voucher
+    # ---------------------------
     save_clicked = st.button("Save Voucher")
 
     if save_clicked:
+        if amount <= 0 and vat_amount <= 0 and wht_amount <= 0:
+            st.error("Please enter at least one positive amount (Base, VAT or WHT).")
+            return
+
         if validation_errors:
             st.error(
                 "Voucher not saved because one or more line totals are higher than the "
                 "remaining invoice balances shown above. Please adjust the Amount, VAT, "
                 "or WHT so they are within the balances."
             )
+            return
+
+        err = create_voucher(
+            company_id=company_id,
+            username=username,
+            vendor=vendor,
+            requester=requester,
+            invoice_ref=invoice_ref,
+            description=description,
+            bank_details=bank_details,
+            amount=amount,
+            vat_amount=vat_amount,
+            wht_amount=wht_amount,
+            currency=currency,
+            expense_account_code=expense_account_code,
+            payable_account_code=payable_account_code,
+            voucher_date=voucher_date,
+        )
+
+        if err is not None:
+            st.error(err)
         else:
-            err = create_voucher(
-                company_id=company_id,
-                username=username,
-                vendor=vendor,
-                requester=requester,
-                invoice_ref=invoice_ref,
-                description=description,
-                bank_details=bank_details,
-                amount=amount,
-                vat_amount=vat_amount,
-                wht_amount=wht_amount,
-                currency=currency,
-                expense_account_code=expense_account_code,
-                payable_account_code=payable_account_code,
-                voucher_date=voucher_date,
-            )
-            if err is not None:
-                st.error(err)
-            else:
-                st.success("Voucher created successfully.")
+            st.success("Voucher created successfully.")
 
-                # Save attachment if any
-                if file_name and file_bytes and invoice_ref:
-                    try:
-                        save_voucher_attachment(
-                            company_id=company_id,
-                            invoice_ref=invoice_ref,
-                            file_name=file_name,
-                            file_bytes=file_bytes,
-                        )
-                        st.success("Attachment uploaded successfully.")
-                    except Exception as e:
-                        st.error(f"Failed to save attachment: {e}")
+            # Save attachment if any
+            if file_name and file_bytes and invoice_ref:
+                try:
+                    save_voucher_attachment(
+                        company_id=company_id,
+                        invoice_ref=invoice_ref,
+                        file_name=file_name,
+                        file_bytes=file_bytes,
+                    )
+                    st.success("Attachment uploaded successfully.")
+                except Exception as e:
+                    st.error(f"Failed to save attachment: {e}")
 
-                st.experimental_rerun()
+            st.experimental_rerun()
 
+    # ---------------------------
+    # Existing vouchers
+    # ---------------------------
     st.markdown("## Existing Vouchers")
 
     vouchers = list_vouchers(company_id=company_id)
