@@ -5,9 +5,19 @@ from contextlib import closing
 from datetime import datetime
 from typing import List, Dict, Optional
 
-from db_config import connect, VOUCHER_TABLE_SQL, VOUCHER_LINES_TABLE_SQL, VOUCHER_DOCS_TABLE_SQL, log_action
+from db_config import (
+    connect,
+    VOUCHER_TABLE_SQL,
+    VOUCHER_LINES_TABLE_SQL,
+    VOUCHER_DOCS_TABLE_SQL,
+    log_action,
+)
 from crm_gateway import get_vendor_name_list, get_requester_options
 
+
+# ------------------------
+# Schema init
+# ------------------------
 
 def init_voucher_schema() -> None:
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
@@ -17,111 +27,24 @@ def init_voucher_schema() -> None:
         conn.commit()
 
 
-def _now_ts():
+# ------------------------
+# Helpers
+# ------------------------
+
+def _now_ts() -> datetime:
     return datetime.utcnow()
 
 
-# ------------------------
-# Numbering
-# ------------------------
-
-def generate_next_voucher_number(company_id: int, prefix: str = "VCH") -> str:
-    year = datetime.utcnow().year
-    with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT voucher_number
-            FROM vouchers
-            WHERE company_id = %s
-              AND voucher_number LIKE %s
-            ORDER BY voucher_number DESC
-            LIMIT 1
-            """,
-            (company_id, f"{prefix}-{year}-%"),
-        )
-        row = cur.fetchone()
-
-    if not row or not row["voucher_number"]:
-        return f"{prefix}-{year}-0001"
-
-    last = row["voucher_number"]
-    try:
-        last_seq = int(last.split("-")[-1])
-    except Exception:
-        last_seq = 0
-    next_seq = last_seq + 1
-    return f"{prefix}-{year}-{next_seq:04d}"
+def generate_voucher_number(company_id: int) -> str:
+    """
+    Simple timestamp-based voucher number, unique per company.
+    """
+    now = datetime.utcnow()
+    return now.strftime("VCH-%Y%m%d%H%M%S")
 
 
 # ------------------------
-# Queries
-# ------------------------
-
-def list_vouchers(company_id: int) -> List[Dict]:
-    with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT
-                id, parent_id, version, voucher_number,
-                vendor, requester, invoice_ref,
-                currency, status,
-                last_modified, approved_by, approved_at
-            FROM vouchers
-            WHERE company_id = %s
-            ORDER BY last_modified DESC NULLS LAST, id DESC
-            """,
-            (company_id,),
-        )
-        rows = cur.fetchall()
-    return [dict(r) for r in rows]
-
-
-def get_voucher_with_lines(company_id: int, voucher_id: int) -> Optional[Dict]:
-    with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT *
-            FROM vouchers
-            WHERE company_id = %s
-              AND id = %s
-            """,
-            (company_id, voucher_id),
-        )
-        header = cur.fetchone()
-        if not header:
-            return None
-
-        cur.execute(
-            """
-            SELECT *
-            FROM voucher_lines
-            WHERE voucher_id = %s
-            ORDER BY line_no, id
-            """,
-            (voucher_id,),
-        )
-        lines = cur.fetchall()
-
-        cur.execute(
-            """
-            SELECT id, file_name, created_at
-            FROM voucher_documents
-            WHERE voucher_id = %s
-            ORDER BY created_at
-            """,
-            (voucher_id,),
-        )
-        docs = cur.fetchall()
-
-    return {
-        "header": dict(header),
-        "lines": [dict(l) for l in lines],
-        "documents": [dict(d) for d in docs],
-    }
-
-
-# ------------------------
-# Creation & versioning
+# Create
 # ------------------------
 
 def create_voucher(
@@ -129,64 +52,110 @@ def create_voucher(
     username: str,
     vendor: str,
     requester: str,
-    invoice_ref: Optional[str],
+    invoice_ref: str,
     currency: str,
     lines: List[Dict],
-    file_name: Optional[str] = None,
-    file_bytes: Optional[bytes] = None,
-    extra_docs: Optional[List[Dict]] = None,  # [{file_name, file_bytes}, ...]
+    file_name: Optional[str],
+    file_bytes: Optional[bytes],
 ) -> Optional[str]:
     """
-    Create a brand-new voucher (version 1) with its line items.
-    Will:
-    - Validate vendor + requester exist in CRM lists (by name)
-    - Auto compute VAT/WHT/total per line
-    - Prevent duplicate attachments by file_name within same voucher
+    Create a new voucher with line items and optional attachment.
     """
     vendor = (vendor or "").strip()
     requester = (requester or "").strip()
-    invoice_ref = (invoice_ref or "").strip() or None
+    invoice_ref = (invoice_ref or "").strip()
     currency = (currency or "").strip() or "NGN"
 
     if not vendor:
         return "Vendor is required."
     if not requester:
         return "Requester is required."
-    if not lines:
-        return "At least one line is required."
 
-    # Soft validation against CRM lists (logic inspired by old app)
-    vendor_opts = get_vendor_name_list(company_id)
-    if vendor not in vendor_opts:
-        return f"Vendor '{vendor}' not found in CRM. Please create it in the CRM tab."
+    # Validate vendor exists in CRM
+    vendor_list = get_vendor_name_list(company_id)
+    if vendor not in vendor_list:
+        return f"Vendor '{vendor}' not found in CRM. Please create it first in the CRM tab."
 
+    # Validate requester exists in staff options (soft check)
     requester_opts = get_requester_options(company_id)
-    if requester not in requester_opts and not requester.startswith("--"):
-        # allow free text a bit, but warn
+    if requester not in requester_opts:
+        # Not fatal, but warn
         pass
 
-    voucher_number = generate_next_voucher_number(company_id)
+    if not lines:
+        return "At least one voucher line is required."
+
+    # Basic validation of lines
+    valid_lines: List[Dict] = []
+    for idx, ln in enumerate(lines):
+        desc = (ln.get("description") or "").strip()
+        account_name = (ln.get("account_name") or "").strip()
+        amount = float(ln.get("amount") or 0.0)
+        vat_percent = float(ln.get("vat_percent") or 0.0)
+        wht_percent = float(ln.get("wht_percent") or 0.0)
+
+        if not desc and amount == 0:
+            # ignore empty rows
+            continue
+        if not desc:
+            return f"Description is required for line {idx + 1}."
+        if amount <= 0:
+            return f"Amount must be > 0 for line {idx + 1}."
+        if not account_name:
+            return f"Account (Chart of Accounts) is required for line {idx + 1}."
+
+        vat_value = round(amount * vat_percent / 100.0, 2)
+        wht_value = round(amount * wht_percent / 100.0, 2)
+
+        valid_lines.append(
+            {
+                "description": desc,
+                "account_name": account_name,
+                "amount": amount,
+                "vat_percent": vat_percent,
+                "wht_percent": wht_percent,
+                "vat_value": vat_value,
+                "wht_value": wht_value,
+            }
+        )
+
+    if not valid_lines:
+        return "No valid voucher lines found."
+
+    voucher_number = generate_voucher_number(company_id)
+    ts = _now_ts()
 
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
-            ts = _now_ts()
-
-            # Header
+            # Insert voucher header
             cur.execute(
                 """
                 INSERT INTO vouchers (
-                    parent_id, version, company_id,
-                    voucher_number, vendor, requester, invoice_ref,
-                    currency, status,
-                    file_name, file_data,
-                    last_modified, approved_by, approved_at
-                )
-                VALUES (
-                    NULL, 1, %s,
-                    %s, %s, %s, %s,
-                    %s, 'draft',
-                    %s, %s,
-                    %s, NULL, NULL
+                    company_id,
+                    parent_id,
+                    version,
+                    voucher_number,
+                    vendor,
+                    requester,
+                    invoice_ref,
+                    currency,
+                    status,
+                    created_at,
+                    last_modified,
+                    approved_by,
+                    approved_at
+                ) VALUES (
+                    %s, NULL, 1,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    NULL,
+                    NULL
                 )
                 RETURNING id
                 """,
@@ -195,78 +164,92 @@ def create_voucher(
                     voucher_number,
                     vendor,
                     requester,
-                    invoice_ref,
+                    invoice_ref or None,
                     currency,
-                    file_name,
-                    file_bytes,
+                    "draft",
+                    ts,
                     ts,
                 ),
             )
-            voucher_id = cur.fetchone()["id"]
+            (voucher_id,) = cur.fetchone()
 
-            # Lines
-            for i, line in enumerate(lines, start=1):
-                desc = (line.get("description") or "").strip()
-                amount = float(line.get("amount") or 0.0)
-                acc_name = (line.get("account_name") or "").strip() or None
-                vat_percent = float(line.get("vat_percent") or 0.0)
-                wht_percent = float(line.get("wht_percent") or 0.0)
-
-                vat_value = round(amount * vat_percent / 100.0, 2)
-                wht_value = round(amount * wht_percent / 100.0, 2)
-                total = round(amount + vat_value - wht_value, 2)
-
+            # Insert lines
+            for ln in valid_lines:
                 cur.execute(
                     """
                     INSERT INTO voucher_lines (
-                        voucher_id, company_id,
-                        line_no, description, amount,
-                        account_name,
-                        vat_percent, wht_percent,
-                        vat_value, wht_value, total
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        voucher_id,
                         company_id,
-                        i,
-                        desc,
+                        voucher_id,
+                        description,
+                        account_name,
                         amount,
-                        acc_name,
                         vat_percent,
                         wht_percent,
                         vat_value,
-                        wht_value,
-                        total,
+                        wht_value
+                    ) VALUES (
+                        %s, %s,
+                        %s, %s,
+                        %s,
+                        %s, %s,
+                        %s, %s
+                    )
+                    """,
+                    (
+                        company_id,
+                        voucher_id,
+                        ln["description"],
+                        ln["account_name"],
+                        ln["amount"],
+                        ln["vat_percent"],
+                        ln["wht_percent"],
+                        ln["vat_value"],
+                        ln["wht_value"],
                     ),
                 )
 
-            # Extra attachments – enforce unique file_name per voucher
-            extra_docs = extra_docs or []
-            for doc in extra_docs:
-                dname = (doc.get("file_name") or "").strip()
-                dbytes = doc.get("file_bytes")
-                if not dname or not dbytes:
-                    continue
-
+            # Insert attachment (optional)
+            if file_name and file_bytes:
                 cur.execute(
                     """
-                    INSERT INTO voucher_documents (voucher_id, company_id, file_name, file_data)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (voucher_id, file_name) DO NOTHING
+                    INSERT INTO voucher_documents (
+                        company_id,
+                        voucher_id,
+                        file_name,
+                        file_data,
+                        uploaded_at
+                    ) VALUES (
+                        %s, %s,
+                        %s, %s,
+                        %s
+                    )
                     """,
-                    (voucher_id, company_id, dname, dbytes),
+                    (
+                        company_id,
+                        voucher_id,
+                        file_name,
+                        file_bytes,
+                        ts,
+                    ),
                 )
 
             conn.commit()
 
-        log_action(username, "create_voucher", "vouchers", ref=voucher_number, company_id=company_id)
+        log_action(
+            username,
+            "create_voucher",
+            "vouchers",
+            ref=voucher_number,
+            company_id=company_id,
+        )
         return None
-
     except Exception as ex:
         return f"Error creating voucher: {ex}"
 
+
+# ------------------------
+# Status change / delete
+# ------------------------
 
 def change_voucher_status(
     company_id: int,
@@ -274,18 +257,21 @@ def change_voucher_status(
     new_status: str,
     actor_username: str,
 ) -> Optional[str]:
+    """
+    Change the status of a voucher (draft / submitted / approved / rejected).
+    """
     new_status = (new_status or "").strip().lower()
-    if new_status not in ("draft", "submitted", "approved", "rejected"):
-        return "Invalid status."
+    if new_status not in {"draft", "submitted", "approved", "rejected"}:
+        return f"Invalid status '{new_status}'."
 
+    ts = _now_ts()
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
-            ts = _now_ts()
-            if new_status == "approved":
+            if new_status in ("approved", "rejected"):
                 cur.execute(
                     """
                     UPDATE vouchers
-                    SET status = %s,
+                    SET status      = %s,
                         approved_by = %s,
                         approved_at = %s,
                         last_modified = %s
@@ -307,7 +293,113 @@ def change_voucher_status(
                 )
             conn.commit()
 
-        log_action(actor_username, f"voucher_status_{new_status}", "vouchers", ref=str(voucher_id), company_id=company_id)
+        log_action(
+            actor_username,
+            f"voucher_status_{new_status}",
+            "vouchers",
+            ref=str(voucher_id),
+            company_id=company_id,
+        )
         return None
     except Exception as ex:
         return f"Error changing voucher status: {ex}"
+
+
+def delete_voucher(
+    company_id: int,
+    voucher_id: int,
+    actor_username: str,
+) -> Optional[str]:
+    """
+    Hard-delete a voucher for this company.
+    Assuming ON DELETE CASCADE on voucher_lines and voucher_documents.
+    """
+    try:
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            cur.execute(
+                """
+                DELETE FROM vouchers
+                WHERE company_id = %s
+                  AND id = %s
+                """,
+                (company_id, voucher_id),
+            )
+            conn.commit()
+
+        log_action(
+            actor_username,
+            "voucher_delete",
+            "vouchers",
+            ref=str(voucher_id),
+            company_id=company_id,
+        )
+        return None
+    except Exception as ex:
+        return f"Error deleting voucher: {ex}"
+
+
+# ------------------------
+# Queries
+# ------------------------
+
+def list_vouchers(company_id: int) -> List[Dict]:
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                parent_id,
+                version,
+                voucher_number,
+                vendor,
+                requester,
+                invoice_ref,
+                currency,
+                status,
+                created_at,
+                last_modified,
+                approved_by,
+                approved_at
+            FROM vouchers
+            WHERE company_id = %s
+            ORDER BY last_modified DESC, id DESC
+            """,
+            (company_id,),
+        )
+        rows = cur.fetchall()
+
+    result: List[Dict] = []
+    for r in rows:
+        (
+            vid,
+            parent_id,
+            version,
+            voucher_number,
+            vendor,
+            requester,
+            invoice_ref,
+            currency,
+            status,
+            created_at,
+            last_modified,
+            approved_by,
+            approved_at,
+        ) = r
+        result.append(
+            {
+                "id": vid,
+                "parent_id": parent_id,
+                "version": version,
+                "voucher_number": voucher_number,
+                "vendor": vendor,
+                "requester": requester,
+                "invoice_ref": invoice_ref,
+                "currency": currency,
+                "status": status,
+                "created_at": created_at,
+                "last_modified": last_modified,
+                "approved_by": approved_by,
+                "approved_at": approved_at,
+            }
+        )
+    return result
