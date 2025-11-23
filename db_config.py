@@ -249,6 +249,7 @@ def init_schema() -> None:
 
         # --- Lightweight migrations for existing staff table ---
         # In case staff was created earlier without these columns.
+        cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS company_id INTEGER;")
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS status TEXT;")
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS position TEXT;")
 
