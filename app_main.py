@@ -283,7 +283,7 @@ def app_vouchers():
 
     if selected_invoice:
         try:
-            invoice_currency = selected_invoice.get("currency", "NGN")
+            invoice_currency = (selected_invoice.get("currency") or "NGN").upper()
             # Get aggregate allocations from helper
             allocation = get_invoice_allocations(company_id, invoice_ref)
             # Get any existing voucher lines for this invoice
@@ -292,21 +292,24 @@ def app_vouchers():
             st.warning(f"Could not load invoice allocations: {e}")
             allocation = None
 
-    if selected_invoice and allocation:
+    # Balances we’ll use for validation
+    actual_balance = None
+    vat_balance = None
+    wht_balance = None
+
+    # ---- Invoice allocation summary (amounts, paid, balances) ----
+    if selected_invoice is not None and allocation is not None:
         inv_vatable = float(selected_invoice.get("vatable_amount") or 0.0)
         inv_non_vatable = float(selected_invoice.get("non_vatable_amount") or 0.0)
         inv_vat_total = float(selected_invoice.get("vat_amount") or 0.0)
         inv_wht_total = float(selected_invoice.get("wht_amount") or 0.0)
 
+        # Base (invoice) amount = vatable + non-vatable
         actual_total = inv_vatable + inv_non_vatable
 
-        try:
-            amount_paid = float(allocation.get("amount_paid") or 0.0)
-            vat_paid = float(allocation.get("vat_paid") or 0.0)
-            wht_paid = float(allocation.get("wht_paid") or 0.0)
-        except Exception as e:
-            st.warning(f"Could not compute invoice allocation summary: {e}")
-            amount_paid = vat_paid = wht_paid = 0.0
+        amount_paid = float(allocation.get("amount_paid") or 0.0)
+        vat_paid = float(allocation.get("vat_paid") or 0.0)
+        wht_paid = float(allocation.get("wht_paid") or 0.0)
 
         # Balances
         actual_balance = actual_total - amount_paid
@@ -364,7 +367,7 @@ def app_vouchers():
                 unsafe_allow_html=True,
             )
 
-        # Show a detailed table of voucher line allocations if any
+        # Detailed voucher lines (if any)
         st.markdown("#### Detailed Voucher Line Allocations")
         if line_allocations:
             df_lines = pd.DataFrame(line_allocations)
@@ -422,7 +425,7 @@ def app_vouchers():
     # Validation vs invoice
     # ---------------------------
     validation_errors = []
-    if selected_invoice and allocation:
+    if selected_invoice is not None and allocation is not None:
         inv_vatable = float(selected_invoice.get("vatable_amount") or 0.0)
         inv_non_vatable = float(selected_invoice.get("non_vatable_amount") or 0.0)
         inv_vat_total = float(selected_invoice.get("vat_amount") or 0.0)
@@ -461,7 +464,6 @@ def app_vouchers():
 
     if save_clicked:
         if validation_errors:
-            # Do not call create_voucher – just explain
             st.error(
                 "Voucher not saved because one or more line totals are higher than the "
                 "remaining invoice balances shown above. Please adjust the Amount, VAT, "
@@ -537,7 +539,9 @@ def app_vouchers():
 
     # PDF download for voucher
     st.markdown("### Download Voucher PDF")
-    pdf_voucher_id = st.selectbox("Select Voucher ID for PDF", vch_ids, key="pdf_voucher_id")
+    pdf_voucher_id = st.selectbox(
+        "Select Voucher ID for PDF", vch_ids, key="pdf_voucher_id"
+    )
     if st.button("Download Voucher PDF"):
         try:
             pdf_bytes = build_voucher_pdf_bytes(
