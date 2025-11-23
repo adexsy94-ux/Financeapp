@@ -50,10 +50,23 @@ def app_vouchers():
 
     st.subheader("Create Voucher")
 
-    # Voucher number is auto-generated in vouchers_module.create_voucher.
     vendor = st.selectbox("Vendor (from CRM)", vendor_options)
     requester = st.selectbox("Requester (Staff in CRM)", requester_options)
-    invoice_ref = st.text_input("Invoice / Reference")
+
+    # Link vouchers to invoices for this vendor
+    all_invoices = list_invoices(company_id=company_id)
+    invoice_numbers_for_vendor = [
+        row["invoice_number"]
+        for row in all_invoices
+        if row.get("vendor") == vendor
+    ]
+    invoice_choices = ["(None)"] + invoice_numbers_for_vendor
+    invoice_choice = st.selectbox(
+        "Invoice / Reference (all invoices for selected vendor)",
+        invoice_choices,
+    )
+    invoice_ref = "" if invoice_choice == "(None)" else invoice_choice
+
     currency = st.selectbox("Currency", ["NGN", "USD", "GBP", "EUR"], index=0)
 
     uploaded = st.file_uploader(
@@ -226,9 +239,10 @@ def app_invoices():
 
     st.subheader("Create Invoice")
 
-    invoice_number = st.text_input("Invoice Number")
-    vendor_invoice_number = st.text_input("Vendor Invoice Number")
+    st.info("Invoice number will be auto-generated using date and time when you save.")
+
     vendor = st.selectbox("Vendor (from CRM)", vendor_options)
+    vendor_invoice_number = st.text_input("Vendor Invoice Number")
     summary = st.text_area("Summary")
 
     vatable_amount = st.number_input("Vatable Amount", min_value=0.0, step=0.01)
@@ -261,31 +275,28 @@ def app_invoices():
         file_bytes = uploaded.read()
 
     if st.button("Save Invoice"):
-        if not invoice_number:
-            st.error("Invoice number is required.")
+        err = create_invoice(
+            company_id=company_id,
+            username=username,
+            invoice_number="",  # let backend auto-generate based on timestamp
+            vendor_invoice_number=vendor_invoice_number,
+            vendor=vendor,
+            summary=summary,
+            vatable_amount=vatable_amount,
+            non_vatable_amount=non_vatable_amount,
+            vat_rate=vat_rate,
+            wht_rate=wht_rate,
+            terms=terms,
+            payable_account=payable_account,
+            expense_asset_account=expense_asset_account,
+            currency=currency,
+            file_name=file_name,
+            file_bytes=file_bytes,
+        )
+        if err:
+            st.error(err)
         else:
-            err = create_invoice(
-                company_id=company_id,
-                username=username,
-                invoice_number=invoice_number,
-                vendor_invoice_number=vendor_invoice_number,
-                vendor=vendor,
-                summary=summary,
-                vatable_amount=vatable_amount,
-                non_vatable_amount=non_vatable_amount,
-                vat_rate=vat_rate,
-                wht_rate=wht_rate,
-                terms=terms,
-                payable_account=payable_account,
-                expense_asset_account=expense_asset_account,
-                currency=currency,
-                file_name=file_name,
-                file_bytes=file_bytes,
-            )
-            if err:
-                st.error(err)
-            else:
-                st.success("Invoice created successfully.")
+            st.success("Invoice created successfully.")
 
     st.markdown("---")
     st.subheader("Recent Invoices")
@@ -324,18 +335,17 @@ def app_crm():
             status = st.selectbox("Status", ["Active", "Inactive"], index=0)
             position = st.text_input("Position / Role")
 
-        # For now we only create new staff (no edit ID yet)
         submitted_staff = st.form_submit_button("Save Staff")
         if submitted_staff:
             err = upsert_staff(
                 company_id=company_id,
+                staff_id=None,
                 first_name=first_name,
                 last_name=last_name,
                 email=email,
                 phone=phone,
                 status=status,
                 position=position,
-                staff_id=None,
             )
             if err:
                 st.error(err)
