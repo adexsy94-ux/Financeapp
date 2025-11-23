@@ -105,7 +105,6 @@ def app_vouchers():
                         FROM voucher_lines vl
                         JOIN vouchers v
                           ON v.id = vl.voucher_id
-                         AND v.company_id = vl.company_id
                         WHERE v.company_id = %s
                           AND v.invoice_ref = %s
                           AND v.currency = %s
@@ -119,10 +118,9 @@ def app_vouchers():
                     )
                     row = cur.fetchone()
                     if row:
-                        # DictCursor, but use both index/name safely
-                        total_paid = float(row[0] if row[0] is not None else 0.0)
-                        vat_paid = float(row[1] if row[1] is not None else 0.0)
-                        wht_paid = float(row[2] if row[2] is not None else 0.0)
+                        total_paid = float(row[0] or 0.0)
+                        vat_paid = float(row[1] or 0.0)
+                        wht_paid = float(row[2] or 0.0)
         except Exception as e:
             st.warning(f"Could not compute invoice allocation summary: {e}")
 
