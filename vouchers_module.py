@@ -3,7 +3,7 @@
 
 from contextlib import closing
 from datetime import datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Tuple
 
 from db_config import (
     connect,
@@ -48,53 +48,6 @@ def generate_voucher_number(company_id: int) -> str:
 # Create
 # ------------------------
 
-def _validate_and_prepare_lines(lines: List[Dict]) -> List[Dict]:
-    """
-    Shared validation for create/update voucher lines.
-    """
-    valid_lines: List[Dict] = []
-    for idx, ln in enumerate(lines):
-        desc = (ln.get("description") or "").strip()
-        account_name = (ln.get("account_name") or "").strip()
-        amount = float(ln.get("amount") or 0.0)
-        vat_percent = float(ln.get("vat_percent") or 0.0)
-        wht_percent = float(ln.get("wht_percent") or 0.0)
-
-        if not desc and amount == 0:
-            # ignore empty rows
-            continue
-        if not desc:
-            raise ValueError(f"Description is required for line {idx + 1}.")
-        if amount <= 0:
-            raise ValueError(f"Amount must be > 0 for line {idx + 1}.")
-        if not account_name:
-            raise ValueError(
-                f"Account (Chart of Accounts) is required for line {idx + 1}."
-            )
-
-        vat_value = round(amount * vat_percent / 100.0, 2)
-        wht_value = round(amount * wht_percent / 100.0, 2)
-        total = amount + vat_value - wht_value
-
-        valid_lines.append(
-            {
-                "description": desc,
-                "account_name": account_name,
-                "amount": amount,
-                "vat_percent": vat_percent,
-                "wht_percent": wht_percent,
-                "vat_value": vat_value,
-                "wht_value": wht_value,
-                "total": total,
-            }
-        )
-
-    if not valid_lines:
-        raise ValueError("No valid voucher lines found.")
-
-    return valid_lines
-
-
 def create_voucher(
     company_id: int,
     username: str,
@@ -127,13 +80,50 @@ def create_voucher(
     # Validate requester exists in staff options (soft check)
     requester_opts = get_requester_options(company_id)
     if requester not in requester_opts:
-        # Not fatal, but we allow it
+        # Not fatal, but warn silently
         pass
 
-    try:
-        valid_lines = _validate_and_prepare_lines(lines)
-    except ValueError as ex:
-        return str(ex)
+    if not lines:
+        return "At least one voucher line is required."
+
+    # Basic validation of lines
+    valid_lines: List[Dict] = []
+    for idx, ln in enumerate(lines):
+        desc = (ln.get("description") or "").strip()
+        account_name = (ln.get("account_name") or "").strip()
+        amount = float(ln.get("amount") or 0.0)
+        vat_percent = float(ln.get("vat_percent") or 0.0)
+        wht_percent = float(ln.get("wht_percent") or 0.0)
+
+        if not desc and amount == 0:
+            # ignore empty rows
+            continue
+        if not desc:
+            return f"Description is required for line {idx + 1}."
+        if amount <= 0:
+            return f"Amount must be > 0 for line {idx + 1}."
+        if not account_name:
+            return f"Account (Chart of Accounts) is required for line {idx + 1}."
+
+        vat_value = round(amount * vat_percent / 100.0, 2)
+        wht_value = round(amount * wht_percent / 100.0, 2)
+        total = round(amount + vat_value - wht_value, 2)
+
+        valid_lines.append(
+            {
+                "description": desc,
+                "account_name": account_name,
+                "amount": amount,
+                "vat_percent": vat_percent,
+                "wht_percent": wht_percent,
+                "vat_value": vat_value,
+                "wht_value": wht_value,
+                "total": total,
+            }
+        )
+
+    if not valid_lines:
+        return "No valid voucher lines found."
 
     voucher_number = generate_voucher_number(company_id)
     ts = _now_ts()
@@ -186,7 +176,7 @@ def create_voucher(
             )
             (voucher_id,) = cur.fetchone()
 
-            # Insert lines with line_no and total
+            # Insert lines
             for idx, ln in enumerate(valid_lines, start=1):
                 cur.execute(
                     """
@@ -283,7 +273,7 @@ def update_voucher(
     file_bytes: Optional[bytes],
 ) -> Optional[str]:
     """
-    Edit an existing voucher (header + lines + optional document).
+    Update an existing voucher header + lines + optional attachment.
     """
     vendor = (vendor or "").strip()
     requester = (requester or "").strip()
@@ -301,29 +291,63 @@ def update_voucher(
 
     requester_opts = get_requester_options(company_id)
     if requester not in requester_opts:
-        # allow but note silently
+        # soft warning – allow, but we could also block if you prefer
         pass
 
-    try:
-        valid_lines = _validate_and_prepare_lines(lines)
-    except ValueError as ex:
-        return str(ex)
+    if not lines:
+        return "At least one voucher line is required."
+
+    valid_lines: List[Dict] = []
+    for idx, ln in enumerate(lines):
+        desc = (ln.get("description") or "").strip()
+        account_name = (ln.get("account_name") or "").strip()
+        amount = float(ln.get("amount") or 0.0)
+        vat_percent = float(ln.get("vat_percent") or 0.0)
+        wht_percent = float(ln.get("wht_percent") or 0.0)
+
+        if not desc and amount == 0:
+            continue
+        if not desc:
+            return f"Description is required for line {idx + 1}."
+        if amount <= 0:
+            return f"Amount must be > 0 for line {idx + 1}."
+        if not account_name:
+            return f"Account (Chart of Accounts) is required for line {idx + 1}."
+
+        vat_value = round(amount * vat_percent / 100.0, 2)
+        wht_value = round(amount * wht_percent / 100.0, 2)
+        total = round(amount + vat_value - wht_value, 2)
+
+        valid_lines.append(
+            {
+                "description": desc,
+                "account_name": account_name,
+                "amount": amount,
+                "vat_percent": vat_percent,
+                "wht_percent": wht_percent,
+                "vat_value": vat_value,
+                "wht_value": wht_value,
+                "total": total,
+            }
+        )
+
+    if not valid_lines:
+        return "No valid voucher lines found."
 
     ts = _now_ts()
 
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
-            # Update voucher header
+            # Update header
             cur.execute(
                 """
                 UPDATE vouchers
-                SET
-                    vendor       = %s,
+                SET vendor       = %s,
                     requester    = %s,
                     invoice_ref  = %s,
                     currency     = %s,
                     last_modified = %s
-                WHERE id = %s
+                WHERE id         = %s
                   AND company_id = %s
                 """,
                 (
@@ -337,7 +361,7 @@ def update_voucher(
                 ),
             )
 
-            # Replace voucher lines
+            # Replace lines
             cur.execute(
                 """
                 DELETE FROM voucher_lines
@@ -387,7 +411,7 @@ def update_voucher(
                     ),
                 )
 
-            # If a new file is uploaded, replace existing doc (simple strategy)
+            # Replace attachment if new file provided
             if file_name and file_bytes:
                 cur.execute(
                     """
@@ -507,7 +531,7 @@ def delete_voucher(
                 """
                 DELETE FROM vouchers
                 WHERE company_id = %s
-                  AND id = %s
+                  AND id         = %s
                 """,
                 (company_id, voucher_id),
             )
@@ -681,7 +705,7 @@ def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict]:
             FROM voucher_lines
             WHERE company_id = %s
               AND voucher_id = %s
-            ORDER BY line_no NULLS LAST, id
+            ORDER BY line_no, id
             """,
             (company_id, voucher_id),
         )
@@ -721,10 +745,11 @@ def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict]:
 def get_voucher_with_lines(
     company_id: int,
     voucher_id: int,
-) -> Dict[str, Any]:
+) -> Tuple[Dict, List[Dict]]:
     """
-    Convenience helper: returns {"header": voucher_header_dict, "lines": list_of_line_dicts}.
+    Convenience helper used by pdf_utils:
+    returns (voucher_header_dict, list_of_line_dicts).
     """
-    header = get_voucher(company_id, voucher_id)
+    voucher = get_voucher(company_id, voucher_id)
     lines = list_voucher_lines(company_id, voucher_id)
-    return {"header": header, "lines": lines}
+    return voucher, lines
