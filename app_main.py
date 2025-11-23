@@ -79,6 +79,11 @@ def app_vouchers():
     if selected_invoice is not None:
         invoice_currency = (selected_invoice.get("currency") or "NGN").upper()
 
+    # Balances we’ll use for validation
+    actual_balance = None
+    vat_balance = None
+    wht_balance = None
+
     # ---- Invoice allocation summary (amounts, paid, balances) ----
     if selected_invoice is not None:
         inv_vatable = float(selected_invoice.get("vatable_amount") or 0.0)
@@ -86,9 +91,10 @@ def app_vouchers():
         inv_vat_total = float(selected_invoice.get("vat_amount") or 0.0)
         inv_wht_total = float(selected_invoice.get("wht_amount") or 0.0)
 
+        # Base (invoice) amount = vatable + non-vatable
         actual_total = inv_vatable + inv_non_vatable
 
-        total_paid = 0.0
+        amount_paid = 0.0
         vat_paid = 0.0
         wht_paid = 0.0
 
@@ -99,7 +105,7 @@ def app_vouchers():
                     cur.execute(
                         """
                         SELECT
-                            COALESCE(SUM(vl.total), 0)      AS total_paid,
+                            COALESCE(SUM(vl.amount), 0)     AS amount_paid,
                             COALESCE(SUM(vl.vat_value), 0)  AS vat_paid,
                             COALESCE(SUM(vl.wht_value), 0)  AS wht_paid
                         FROM voucher_lines vl
@@ -118,13 +124,14 @@ def app_vouchers():
                     )
                     row = cur.fetchone()
                     if row:
-                        total_paid = float(row[0] or 0.0)
+                        amount_paid = float(row[0] or 0.0)
                         vat_paid = float(row[1] or 0.0)
                         wht_paid = float(row[2] or 0.0)
         except Exception as e:
             st.warning(f"Could not compute invoice allocation summary: {e}")
 
-        actual_balance = actual_total - total_paid
+        # Balances
+        actual_balance = actual_total - amount_paid
         vat_balance = inv_vat_total - vat_paid
         wht_balance = inv_wht_total - wht_paid
 
@@ -140,7 +147,7 @@ def app_vouchers():
             st.write(f"Invoice Amount: **{actual_total:,.2f} {cur_code}**")
             st.markdown(
                 "Amount Paid via Vouchers: "
-                f"<span style='color: green; font-weight:bold;'>{total_paid:,.2f} {cur_code}</span>",
+                f"<span style='color: green; font-weight:bold;'>{amount_paid:,.2f} {cur_code}</span>",
                 unsafe_allow_html=True,
             )
             st.markdown(
@@ -248,22 +255,75 @@ def app_vouchers():
             }
         )
 
-    if st.button("Save Voucher"):
-        err = create_voucher(
-            company_id=company_id,
-            username=username,
-            vendor=vendor,
-            requester=requester,
-            invoice_ref=invoice_ref,
-            currency=currency,
-            lines=lines,
-            file_name=file_name,
-            file_bytes=file_bytes,
-        )
-        if err:
-            st.error(err)
+    # ---- Pre-calculate totals on the current voucher lines ----
+    total_line_amount = sum((l.get("amount") or 0.0) for l in lines)
+    total_line_vat = sum(
+        round((l.get("amount") or 0.0) * (l.get("vat_percent") or 0.0) / 100.0, 2)
+        for l in lines
+    )
+    total_line_wht = sum(
+        round((l.get("amount") or 0.0) * (l.get("wht_percent") or 0.0) / 100.0, 2)
+        for l in lines
+    )
+
+    # ---- Validation against invoice balances ----
+    validation_errors = []
+    if selected_invoice is not None:
+        cur_code = invoice_currency or "NGN"
+
+        # Base amount (Amount column) vs Base Balance
+        if actual_balance is not None and total_line_amount > actual_balance + 0.0001:
+            validation_errors.append(
+                f"Total Amount in voucher lines ({total_line_amount:,.2f} {cur_code}) "
+                f"is greater than the Base Balance to Pay ({actual_balance:,.2f} {cur_code})."
+            )
+
+        # VAT vs VAT Balance
+        if vat_balance is not None and total_line_vat > vat_balance + 0.0001:
+            validation_errors.append(
+                f"Total VAT amount in voucher lines ({total_line_vat:,.2f} {cur_code}) "
+                f"is greater than the VAT Balance ({vat_balance:,.2f} {cur_code})."
+            )
+
+        # WHT vs WHT Balance
+        if wht_balance is not None and total_line_wht > wht_balance + 0.0001:
+            validation_errors.append(
+                f"Total WHT amount in voucher lines ({total_line_wht:,.2f} {cur_code}) "
+                f"is greater than the WHT Balance ({wht_balance:,.2f} {cur_code})."
+            )
+
+    # Show validation errors immediately so user knows why save won't work
+    if validation_errors:
+        for msg in validation_errors:
+            st.error(msg)
+
+    # ---- Save button (only actually saves if validation passes) ----
+    save_clicked = st.button("Save Voucher")
+
+    if save_clicked:
+        if validation_errors:
+            # Do not call create_voucher – just explain
+            st.error(
+                "Voucher not saved because one or more line totals are higher than the "
+                "remaining invoice balances shown above. Please adjust the Amount, VAT, "
+                "or WHT so they are within the balances."
+            )
         else:
-            st.success("Voucher created successfully.")
+            err = create_voucher(
+                company_id=company_id,
+                username=username,
+                vendor=vendor,
+                requester=requester,
+                invoice_ref=invoice_ref,
+                currency=currency,
+                lines=lines,
+                file_name=file_name,
+                file_bytes=file_bytes,
+            )
+            if err:
+                st.error(err)
+            else:
+                st.success("Voucher created successfully.")
 
     st.markdown("---")
     st.subheader("Recent Vouchers")
