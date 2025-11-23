@@ -67,21 +67,101 @@ def app_vouchers():
     )
     invoice_ref = "" if invoice_choice == "(None)" else invoice_choice
 
+    # Find the selected invoice row (if any)
+    selected_invoice = None
+    for inv in all_invoices:
+        if inv.get("invoice_number") == invoice_choice:
+            selected_invoice = inv
+            break
+
+    # Determine invoice currency if invoice is selected
+    invoice_currency = None
+    if selected_invoice is not None:
+        invoice_currency = (selected_invoice.get("currency") or "NGN").upper()
+
+    # ---- Invoice allocation summary (amounts, paid, balances) ----
+    if selected_invoice is not None:
+        inv_vatable = float(selected_invoice.get("vatable_amount") or 0.0)
+        inv_non_vatable = float(selected_invoice.get("non_vatable_amount") or 0.0)
+        inv_vat_total = float(selected_invoice.get("vat_amount") or 0.0)
+        inv_wht_total = float(selected_invoice.get("wht_amount") or 0.0)
+
+        actual_total = inv_vatable + inv_non_vatable
+
+        total_paid = 0.0
+        vat_paid = 0.0
+        wht_paid = 0.0
+
+        # Sum voucher_lines for vouchers referencing this invoice (same company + currency, non-rejected)
+        try:
+            with connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT
+                            COALESCE(SUM(vl.total), 0)      AS total_paid,
+                            COALESCE(SUM(vl.vat_value), 0)  AS vat_paid,
+                            COALESCE(SUM(vl.wht_value), 0)  AS wht_paid
+                        FROM voucher_lines vl
+                        JOIN vouchers v
+                          ON v.id = vl.voucher_id
+                         AND v.company_id = vl.company_id
+                        WHERE v.company_id = %s
+                          AND v.invoice_ref = %s
+                          AND v.currency = %s
+                          AND (v.status IS NULL OR v.status <> 'rejected')
+                        """,
+                        (
+                            company_id,
+                            invoice_choice,
+                            invoice_currency or "NGN",
+                        ),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        # DictCursor, but use both index/name safely
+                        total_paid = float(row[0] if row[0] is not None else 0.0)
+                        vat_paid = float(row[1] if row[1] is not None else 0.0)
+                        wht_paid = float(row[2] if row[2] is not None else 0.0)
+        except Exception as e:
+            st.warning(f"Could not compute invoice allocation summary: {e}")
+
+        actual_balance = actual_total - total_paid
+        vat_balance = inv_vat_total - vat_paid
+        wht_balance = inv_wht_total - wht_paid
+
+        cur_code = invoice_currency or "NGN"
+
+        st.markdown("### Invoice Allocation Summary")
+
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            st.markdown("**Base Amount (Vatable + Non-vatable)**")
+            st.write(f"Invoice Amount: **{actual_total:,.2f} {cur_code}**")
+            st.write(f"Amount Paid via Vouchers: **{total_paid:,.2f} {cur_code}**")
+            st.write(f"Balance to Pay: **{actual_balance:,.2f} {cur_code}**")
+
+        with c2:
+            st.markdown("**VAT Allocation**")
+            st.write(f"Invoice VAT: **{inv_vat_total:,.2f} {cur_code}**")
+            st.write(f"VAT Paid via Vouchers: **{vat_paid:,.2f} {cur_code}**")
+            st.write(f"VAT Balance: **{vat_balance:,.2f} {cur_code}**")
+
+        with c3:
+            st.markdown("**WHT Allocation**")
+            st.write(f"Invoice WHT: **{inv_wht_total:,.2f} {cur_code}**")
+            st.write(f"WHT Deducted via Vouchers: **{wht_paid:,.2f} {cur_code}**")
+            st.write(f"WHT Balance: **{wht_balance:,.2f} {cur_code}**")
+
+        st.markdown("---")
+
     # Determine default currency based on selected invoice (if any)
     base_currencies = ["NGN", "USD", "GBP", "EUR"]
-    invoice_currency = None
-    if invoice_choice != "(None)":
-        for inv in all_invoices:
-            if inv.get("invoice_number") == invoice_choice:
-                invoice_currency = (inv.get("currency") or "NGN").upper()
-                break
-
-    # Build currency options, ensuring invoice currency is present
     currencies = base_currencies.copy()
     if invoice_currency and invoice_currency not in currencies:
         currencies.append(invoice_currency)
 
-    # Pick default index: invoice currency if present, else NGN
     default_currency = invoice_currency or "NGN"
     try:
         default_index = currencies.index(default_currency)
