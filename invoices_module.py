@@ -3,7 +3,7 @@
 
 from contextlib import closing
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 from db_config import connect, INVOICE_TABLE_SQL, log_action
 from crm_gateway import (
@@ -37,7 +37,6 @@ def generate_invoice_number(company_id: int) -> str:
     Simple timestamp-based invoice number, unique per company in practice.
     """
     now = datetime.utcnow()
-    # You can later prefix with company code if needed
     return now.strftime("INV-%Y%m%d%H%M%S")
 
 
@@ -142,13 +141,6 @@ def create_invoice(
 
     ts = _now_ts()
 
-    # Align with INVOICE_TABLE_SQL in db_config:
-    #   id, parent_id, version, company_id,
-    #   invoice_number, vendor_invoice_number, vendor, summary,
-    #   vatable_amount, non_vatable_amount, vat_rate, wht_rate,
-    #   vat_amount, wht_amount, subtotal, total_amount,
-    #   terms, payable_account, expense_asset_account,
-    #   currency, file_name, file_data, last_modified
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
             cur.execute(
@@ -228,7 +220,6 @@ def create_invoice(
             (iid,) = cur.fetchone()
             conn.commit()
 
-        # Audit log
         log_action(
             username,
             "create_invoice",
@@ -249,8 +240,6 @@ def create_invoice(
 def list_invoices(company_id: int) -> List[Dict]:
     """
     List invoices for a company.
-
-    Only select columns that actually exist in the DB schema.
     """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
@@ -339,18 +328,212 @@ def list_invoices(company_id: int) -> List[Dict]:
 
 
 # ------------------------
-# Update / delete stubs (to satisfy app_main imports)
+# Update / delete
 # ------------------------
 
-def update_invoice(*args: Any, **kwargs: Any) -> None:
+def update_invoice(
+    company_id: int,
+    invoice_id: int,
+    vendor_invoice_number: Optional[str],
+    vendor: str,
+    summary: Optional[str],
+    vatable_amount: float,
+    vat_rate: float,
+    wht_rate: float,
+    non_vatable_amount: float,
+    terms: Optional[str],
+    payable_account: Optional[str],
+    expense_asset_account: Optional[str],
+    currency: str,
+    username: str,
+    file_name: Optional[str],
+    file_data: Optional[bytes],
+) -> Optional[str]:
     """
-    Placeholder update_invoice.
+    Update an existing invoice in-place.
     """
-    return None
+    vendor_invoice_number = (vendor_invoice_number or "").strip() or None
+    vendor = (vendor or "").strip()
+    summary = (summary or "").strip() or None
+    terms = (terms or "").strip() or None
+    payable_account = (payable_account or "").strip() or None
+    expense_asset_account = (expense_asset_account or "").strip() or None
+    currency = (currency or "").strip() or "NGN"
+
+    if not vendor:
+        return "Vendor is required."
+
+    # Validate vendor exists in CRM
+    vendor_opts = get_vendor_name_list(company_id)
+    if vendor not in vendor_opts:
+        return (
+            f"Vendor '{vendor}' not found in CRM. "
+            "Please create it first in the CRM tab."
+        )
+
+    # Soft-validate accounts (if provided)
+    payables = get_payable_account_options(company_id)
+    expenses = get_expense_asset_account_options(company_id)
+
+    if payable_account and payable_account not in payables:
+        return (
+            f"Payable account '{payable_account}' is not in "
+            "Chart of Accounts for this company."
+        )
+    if expense_asset_account and expense_asset_account not in expenses:
+        return (
+            f"Expense/Asset account '{expense_asset_account}' is not in "
+            "Chart of Accounts for this company."
+        )
+
+    totals = compute_invoice_totals(
+        vatable_amount=vatable_amount,
+        non_vatable_amount=non_vatable_amount,
+        vat_rate=vat_rate,
+        wht_rate=wht_rate,
+    )
+
+    ts = _now_ts()
+
+    try:
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            # If a new file is uploaded, update file_name/file_data.
+            # If file_name is None, we leave existing file as-is.
+            if file_name is not None and file_data is not None:
+                cur.execute(
+                    """
+                    UPDATE invoices
+                    SET
+                        vendor_invoice_number = %s,
+                        vendor                = %s,
+                        summary               = %s,
+                        vatable_amount        = %s,
+                        non_vatable_amount    = %s,
+                        vat_rate              = %s,
+                        wht_rate              = %s,
+                        vat_amount            = %s,
+                        wht_amount            = %s,
+                        subtotal              = %s,
+                        total_amount          = %s,
+                        terms                 = %s,
+                        payable_account       = %s,
+                        expense_asset_account = %s,
+                        currency              = %s,
+                        file_name             = %s,
+                        file_data             = %s,
+                        last_modified         = %s
+                    WHERE company_id = %s
+                      AND id         = %s
+                    """,
+                    (
+                        vendor_invoice_number,
+                        vendor,
+                        summary,
+                        vatable_amount,
+                        non_vatable_amount,
+                        vat_rate,
+                        wht_rate,
+                        totals["vat_amount"],
+                        totals["wht_amount"],
+                        totals["subtotal"],
+                        totals["total_amount"],
+                        terms,
+                        payable_account,
+                        expense_asset_account,
+                        currency,
+                        file_name,
+                        file_data,
+                        ts,
+                        company_id,
+                        invoice_id,
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE invoices
+                    SET
+                        vendor_invoice_number = %s,
+                        vendor                = %s,
+                        summary               = %s,
+                        vatable_amount        = %s,
+                        non_vatable_amount    = %s,
+                        vat_rate              = %s,
+                        wht_rate              = %s,
+                        vat_amount            = %s,
+                        wht_amount            = %s,
+                        subtotal              = %s,
+                        total_amount          = %s,
+                        terms                 = %s,
+                        payable_account       = %s,
+                        expense_asset_account = %s,
+                        currency              = %s,
+                        last_modified         = %s
+                    WHERE company_id = %s
+                      AND id         = %s
+                    """,
+                    (
+                        vendor_invoice_number,
+                        vendor,
+                        summary,
+                        vatable_amount,
+                        non_vatable_amount,
+                        vat_rate,
+                        wht_rate,
+                        totals["vat_amount"],
+                        totals["wht_amount"],
+                        totals["subtotal"],
+                        totals["total_amount"],
+                        terms,
+                        payable_account,
+                        expense_asset_account,
+                        currency,
+                        ts,
+                        company_id,
+                        invoice_id,
+                    ),
+                )
+            conn.commit()
+
+        log_action(
+            username,
+            "update_invoice",
+            "invoices",
+            ref=str(invoice_id),
+            company_id=company_id,
+        )
+        return None
+    except Exception as ex:
+        return f"Error updating invoice: {ex}"
 
 
-def delete_invoice(*args: Any, **kwargs: Any) -> None:
+def delete_invoice(
+    company_id: int,
+    invoice_id: int,
+    username: str,
+) -> Optional[str]:
     """
-    Placeholder delete_invoice.
+    Delete an invoice (hard delete).
     """
-    return None
+    try:
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            cur.execute(
+                """
+                DELETE FROM invoices
+                WHERE company_id = %s
+                  AND id         = %s
+                """,
+                (company_id, invoice_id),
+            )
+            conn.commit()
+
+        log_action(
+            username,
+            "delete_invoice",
+            "invoices",
+            ref=str(invoice_id),
+            company_id=company_id,
+        )
+        return None
+    except Exception as ex:
+        return f"Error deleting invoice: {ex}"
