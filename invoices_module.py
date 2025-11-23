@@ -247,7 +247,6 @@ def create_invoice(
 
         return iid
     except Exception as ex:
-        # Let Streamlit show the exception stack, but with a clear message
         raise RuntimeError(f"Error creating invoice: {ex}") from ex
 
 
