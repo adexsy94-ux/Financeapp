@@ -127,9 +127,10 @@ CREATE TABLE IF NOT EXISTS vouchers (
     company_id      INTEGER REFERENCES companies(id) ON DELETE CASCADE,
 
     voucher_number  TEXT NOT NULL,
-    vendor          TEXT NOT NULL,
-    requester       TEXT NOT NULL,
+    vendor          TEXT,
+    requester       TEXT,
     invoice_ref     TEXT,
+
     currency        TEXT NOT NULL DEFAULT 'NGN',
     status          TEXT NOT NULL DEFAULT 'draft',
 
@@ -248,10 +249,13 @@ def init_schema() -> None:
         cur.execute(AUDIT_LOG_TABLE_SQL)
 
         # --- Lightweight migrations for existing staff table ---
-        # In case staff was created earlier without these columns.
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS company_id INTEGER;")
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS status TEXT;")
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS position TEXT;")
+
+        # --- Lightweight migrations for existing vouchers table ---
+        # In case vouchers was created earlier without multi-tenant columns.
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS company_id INTEGER;")
 
         conn.commit()
 
