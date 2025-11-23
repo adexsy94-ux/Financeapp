@@ -3,7 +3,7 @@
 
 from contextlib import closing
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 from db_config import (
     connect,
@@ -20,6 +20,7 @@ from crm_gateway import get_vendor_name_list, get_requester_options
 # ------------------------
 
 def init_voucher_schema() -> None:
+    """Ensure voucher tables exist."""
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(VOUCHER_TABLE_SQL)
         cur.execute(VOUCHER_LINES_TABLE_SQL)
@@ -343,6 +344,9 @@ def delete_voucher(
 # ------------------------
 
 def list_vouchers(company_id: int) -> List[Dict]:
+    """
+    List all vouchers for a company (header only).
+    """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """
@@ -403,3 +407,133 @@ def list_vouchers(company_id: int) -> List[Dict]:
             }
         )
     return result
+
+
+def get_voucher(company_id: int, voucher_id: int) -> Dict:
+    """
+    Fetch a single voucher header.
+    """
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                parent_id,
+                version,
+                voucher_number,
+                vendor,
+                requester,
+                invoice_ref,
+                currency,
+                status,
+                created_at,
+                last_modified,
+                approved_by,
+                approved_at
+            FROM vouchers
+            WHERE company_id = %s
+              AND id         = %s
+            """,
+            (company_id, voucher_id),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        raise ValueError(f"Voucher {voucher_id} not found for company {company_id}.")
+
+    (
+        vid,
+        parent_id,
+        version,
+        voucher_number,
+        vendor,
+        requester,
+        invoice_ref,
+        currency,
+        status,
+        created_at,
+        last_modified,
+        approved_by,
+        approved_at,
+    ) = row
+
+    return {
+        "id": vid,
+        "parent_id": parent_id,
+        "version": version,
+        "voucher_number": voucher_number,
+        "vendor": vendor,
+        "requester": requester,
+        "invoice_ref": invoice_ref,
+        "currency": currency,
+        "status": status,
+        "created_at": created_at,
+        "last_modified": last_modified,
+        "approved_by": approved_by,
+        "approved_at": approved_at,
+    }
+
+
+def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict]:
+    """
+    Fetch all lines for a voucher.
+    """
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                description,
+                account_name,
+                amount,
+                vat_percent,
+                wht_percent,
+                vat_value,
+                wht_value
+            FROM voucher_lines
+            WHERE company_id = %s
+              AND voucher_id = %s
+            ORDER BY id
+            """,
+            (company_id, voucher_id),
+        )
+        rows = cur.fetchall()
+
+    result: List[Dict] = []
+    for r in rows:
+        (
+            lid,
+            description,
+            account_name,
+            amount,
+            vat_percent,
+            wht_percent,
+            vat_value,
+            wht_value,
+        ) = r
+        result.append(
+            {
+                "id": lid,
+                "description": description,
+                "account_name": account_name,
+                "amount": amount,
+                "vat_percent": vat_percent,
+                "wht_percent": wht_percent,
+                "vat_value": vat_value,
+                "wht_value": wht_value,
+            }
+        )
+    return result
+
+
+def get_voucher_with_lines(
+    company_id: int,
+    voucher_id: int,
+) -> Tuple[Dict, List[Dict]]:
+    """
+    Convenience helper used by pdf_utils:
+    returns (voucher_header_dict, list_of_line_dicts).
+    """
+    voucher = get_voucher(company_id, voucher_id)
+    lines = list_voucher_lines(company_id, voucher_id)
+    return voucher, lines
