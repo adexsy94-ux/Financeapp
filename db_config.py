@@ -254,8 +254,32 @@ def init_schema() -> None:
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS position TEXT;")
 
         # --- Lightweight migrations for existing vouchers table ---
-        # In case vouchers was created earlier without multi-tenant columns.
-        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS company_id INTEGER;")
+        # Add all columns the code expects, but only if missing.
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS parent_id INTEGER;")
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;"
+        )
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS company_id INTEGER;"
+        )
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS vendor TEXT;")
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS requester TEXT;")
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS invoice_ref TEXT;")
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'NGN';"
+        )
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'draft';"
+        )
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS file_name TEXT;")
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS file_data BYTEA;")
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS last_modified TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;"
+        )
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS approved_by TEXT;")
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;"
+        )
 
         conn.commit()
 
