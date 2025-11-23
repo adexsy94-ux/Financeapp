@@ -32,14 +32,6 @@ def _now_ts() -> datetime:
     return datetime.utcnow()
 
 
-def generate_invoice_number(company_id: int) -> str:
-    """
-    Simple timestamp-based invoice number, unique per company in practice.
-    """
-    now = datetime.utcnow()
-    return now.strftime("INV-%Y%m%d%H%M%S")
-
-
 def compute_invoice_totals(
     vatable_amount: float,
     non_vatable_amount: float,
@@ -68,6 +60,14 @@ def compute_invoice_totals(
     }
 
 
+def _generate_invoice_number() -> str:
+    """
+    Simple timestamp-based invoice number.
+    """
+    now = datetime.utcnow()
+    return now.strftime("INV-%Y%m%d%H%M%S")
+
+
 # ------------------------
 # Create invoice
 # ------------------------
@@ -93,11 +93,14 @@ def create_invoice(
     """
     Create a new invoice and return its ID.
 
-    If invoice_number is blank/empty, it will be auto-generated using a timestamp
-    (e.g. INV-20251123103858).
+    app_main.py calls this with invoice_number="",
+    so we auto-generate the invoice_number if blank.
     """
 
     invoice_number = (invoice_number or "").strip()
+    if not invoice_number:
+        invoice_number = _generate_invoice_number()
+
     vendor_invoice_number = (vendor_invoice_number or "").strip() or None
     vendor = (vendor or "").strip()
     summary = (summary or "").strip() or None
@@ -108,9 +111,6 @@ def create_invoice(
 
     if not vendor:
         raise ValueError("Vendor is required.")
-
-    if not invoice_number:
-        invoice_number = generate_invoice_number(company_id)
 
     # Validate vendor exists in CRM
     vendor_opts = get_vendor_name_list(company_id)
@@ -220,6 +220,7 @@ def create_invoice(
             (iid,) = cur.fetchone()
             conn.commit()
 
+        # Audit log
         log_action(
             username,
             "create_invoice",
@@ -240,6 +241,9 @@ def create_invoice(
 def list_invoices(company_id: int) -> List[Dict]:
     """
     List invoices for a company.
+
+    IMPORTANT: only select columns that actually exist in the DB schema:
+    there is NO 'created_at' column on the invoices table, only 'last_modified'.
     """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
@@ -350,7 +354,8 @@ def update_invoice(
     file_data: Optional[bytes],
 ) -> Optional[str]:
     """
-    Update an existing invoice in-place.
+    Update an existing invoice.
+    Returns None on success, or an error message.
     """
     vendor_invoice_number = (vendor_invoice_number or "").strip() or None
     vendor = (vendor or "").strip()
@@ -367,8 +372,7 @@ def update_invoice(
     vendor_opts = get_vendor_name_list(company_id)
     if vendor not in vendor_opts:
         return (
-            f"Vendor '{vendor}' not found in CRM. "
-            "Please create it first in the CRM tab."
+            f"Vendor '{vendor}' not found in CRM. Please create it first in the CRM tab."
         )
 
     # Soft-validate accounts (if provided)
@@ -377,13 +381,11 @@ def update_invoice(
 
     if payable_account and payable_account not in payables:
         return (
-            f"Payable account '{payable_account}' is not in "
-            "Chart of Accounts for this company."
+            f"Payable account '{payable_account}' is not in Chart of Accounts for this company."
         )
     if expense_asset_account and expense_asset_account not in expenses:
         return (
-            f"Expense/Asset account '{expense_asset_account}' is not in "
-            "Chart of Accounts for this company."
+            f"Expense/Asset account '{expense_asset_account}' is not in Chart of Accounts for this company."
         )
 
     totals = compute_invoice_totals(
@@ -397,14 +399,11 @@ def update_invoice(
 
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
-            # If a new file is uploaded, update file_name/file_data.
-            # If file_name is None, we leave existing file as-is.
             if file_name is not None and file_data is not None:
                 cur.execute(
                     """
                     UPDATE invoices
-                    SET
-                        vendor_invoice_number = %s,
+                    SET vendor_invoice_number = %s,
                         vendor                = %s,
                         summary               = %s,
                         vatable_amount        = %s,
@@ -452,8 +451,7 @@ def update_invoice(
                 cur.execute(
                     """
                     UPDATE invoices
-                    SET
-                        vendor_invoice_number = %s,
+                    SET vendor_invoice_number = %s,
                         vendor                = %s,
                         summary               = %s,
                         vatable_amount        = %s,
@@ -513,7 +511,7 @@ def delete_invoice(
     username: str,
 ) -> Optional[str]:
     """
-    Delete an invoice (hard delete).
+    Delete an invoice. (Hard delete.)
     """
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
