@@ -3,7 +3,7 @@
 
 from contextlib import closing
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Any
 
 from db_config import (
     connect,
@@ -80,7 +80,7 @@ def create_voucher(
     # Validate requester exists in staff options (soft check)
     requester_opts = get_requester_options(company_id)
     if requester not in requester_opts:
-        # Not fatal, but warn silently
+        # Not fatal, but we allow it
         pass
 
     if not lines:
@@ -107,6 +107,7 @@ def create_voucher(
 
         vat_value = round(amount * vat_percent / 100.0, 2)
         wht_value = round(amount * wht_percent / 100.0, 2)
+        total = amount + vat_value - wht_value
 
         valid_lines.append(
             {
@@ -117,6 +118,7 @@ def create_voucher(
                 "wht_percent": wht_percent,
                 "vat_value": vat_value,
                 "wht_value": wht_value,
+                "total": total,
             }
         )
 
@@ -174,31 +176,36 @@ def create_voucher(
             )
             (voucher_id,) = cur.fetchone()
 
-            # Insert lines
-            for ln in valid_lines:
+            # Insert lines with line_no and total
+            for idx, ln in enumerate(valid_lines, start=1):
                 cur.execute(
                     """
                     INSERT INTO voucher_lines (
                         company_id,
                         voucher_id,
+                        line_no,
                         description,
                         account_name,
                         amount,
                         vat_percent,
                         wht_percent,
                         vat_value,
-                        wht_value
+                        wht_value,
+                        total
                     ) VALUES (
-                        %s, %s,
                         %s, %s,
                         %s,
                         %s, %s,
-                        %s, %s
+                        %s,
+                        %s, %s,
+                        %s, %s,
+                        %s
                     )
                     """,
                     (
                         company_id,
                         voucher_id,
+                        idx,
                         ln["description"],
                         ln["account_name"],
                         ln["amount"],
@@ -206,6 +213,7 @@ def create_voucher(
                         ln["wht_percent"],
                         ln["vat_value"],
                         ln["wht_value"],
+                        ln["total"],
                     ),
                 )
 
@@ -218,7 +226,7 @@ def create_voucher(
                         voucher_id,
                         file_name,
                         file_data,
-                        uploaded_at
+                        created_at
                     ) VALUES (
                         %s, %s,
                         %s, %s,
@@ -366,7 +374,7 @@ def list_vouchers(company_id: int) -> List[Dict]:
                 approved_at
             FROM vouchers
             WHERE company_id = %s
-            ORDER BY last_modified DESC, id DESC
+            ORDER BY last_modified DESC NULLS LAST, id DESC
             """,
             (company_id,),
         )
@@ -483,17 +491,19 @@ def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict]:
             """
             SELECT
                 id,
+                line_no,
                 description,
                 account_name,
                 amount,
                 vat_percent,
                 wht_percent,
                 vat_value,
-                wht_value
+                wht_value,
+                total
             FROM voucher_lines
             WHERE company_id = %s
               AND voucher_id = %s
-            ORDER BY id
+            ORDER BY line_no NULLS LAST, id
             """,
             (company_id, voucher_id),
         )
@@ -503,6 +513,7 @@ def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict]:
     for r in rows:
         (
             lid,
+            line_no,
             description,
             account_name,
             amount,
@@ -510,10 +521,12 @@ def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict]:
             wht_percent,
             vat_value,
             wht_value,
+            total,
         ) = r
         result.append(
             {
                 "id": lid,
+                "line_no": line_no,
                 "description": description,
                 "account_name": account_name,
                 "amount": amount,
@@ -521,6 +534,7 @@ def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict]:
                 "wht_percent": wht_percent,
                 "vat_value": vat_value,
                 "wht_value": wht_value,
+                "total": total,
             }
         )
     return result
@@ -529,11 +543,11 @@ def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict]:
 def get_voucher_with_lines(
     company_id: int,
     voucher_id: int,
-) -> Tuple[Dict, List[Dict]]:
+) -> Dict[str, Any]:
     """
     Convenience helper used by pdf_utils:
-    returns (voucher_header_dict, list_of_line_dicts).
+    returns {"header": voucher_header_dict, "lines": list_of_line_dicts}.
     """
-    voucher = get_voucher(company_id, voucher_id)
+    header = get_voucher(company_id, voucher_id)
     lines = list_voucher_lines(company_id, voucher_id)
-    return voucher, lines
+    return {"header": header, "lines": lines}
