@@ -79,7 +79,7 @@ def create_voucher(
     # Validate requester exists in staff options (soft check)
     requester_opts = get_requester_options(company_id)
     if requester not in requester_opts:
-        # Not fatal, but warn
+        # Not fatal, but warn silently
         pass
 
     if not lines:
