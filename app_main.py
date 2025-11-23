@@ -195,7 +195,6 @@ def app_vouchers():
             with c3:
                 st.markdown("**WHT Allocation**")
                 st.write(f"Invoice WHT: **{inv_wht_total:,.2f} {cur_code}**")
-                st.markmarkdown if invoice_currency else st.markdown
                 st.markdown(
                     "WHT Deducted via Vouchers: "
                     f"<span style='color: green; font-weight:bold;'>{wht_paid:,.2f} {cur_code}</span>",
