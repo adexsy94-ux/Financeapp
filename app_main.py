@@ -631,6 +631,97 @@ def app_crm():
 
 
 # -------------------
+# Reports
+# -------------------
+
+def app_reports():
+    # Any logged-in user can see reports
+    require_login()
+    user = current_user()
+    company_id = user["company_id"]
+
+    st.subheader("Reports")
+
+    tab1, tab2, tab3 = st.tabs(["Voucher Register", "Invoice Register", "CRM / Master Data"])
+
+    # Voucher report
+    with tab1:
+        st.markdown("### Voucher Register")
+        vdf = pd.DataFrame(list_vouchers(company_id=company_id))
+        if vdf.empty:
+            st.info("No vouchers yet.")
+        else:
+            # Simple filters: by vendor and status if those columns exist
+            if "vendor" in vdf.columns:
+                vendors = ["(All)"] + sorted(
+                    [v for v in vdf["vendor"].dropna().unique().tolist()]
+                )
+                vendor_filter = st.selectbox("Filter by Vendor", vendors)
+                if vendor_filter != "(All)":
+                    vdf = vdf[vdf["vendor"] == vendor_filter]
+
+            if "status" in vdf.columns:
+                statuses = ["(All)"] + sorted(
+                    [s for s in vdf["status"].dropna().unique().tolist()]
+                )
+                status_filter = st.selectbox("Filter by Status", statuses)
+                if status_filter != "(All)":
+                    vdf = vdf[vdf["status"] == status_filter]
+
+            st.dataframe(vdf)
+
+    # Invoice report
+    with tab2:
+        st.markdown("### Invoice Register")
+        idf = pd.DataFrame(list_invoices(company_id=company_id))
+        if idf.empty:
+            st.info("No invoices yet.")
+        else:
+            if "vendor" in idf.columns:
+                vendors = ["(All)"] + sorted(
+                    [v for v in idf["vendor"].dropna().unique().tolist()]
+                )
+                vendor_filter = st.selectbox("Filter by Vendor", vendors, key="inv_vendor_filter")
+                if vendor_filter != "(All)":
+                    idf = idf[idf["vendor"] == vendor_filter]
+
+            if "currency" in idf.columns:
+                currencies = ["(All)"] + sorted(
+                    [c for c in idf["currency"].dropna().unique().tolist()]
+                )
+                currency_filter = st.selectbox("Filter by Currency", currencies, key="inv_currency_filter")
+                if currency_filter != "(All)":
+                    idf = idf[idf["currency"] == currency_filter]
+
+            st.dataframe(idf)
+
+    # CRM / master data overview
+    with tab3:
+        st.markdown("### CRM / Master Data")
+
+        st.markdown("#### Vendors")
+        vdf = pd.DataFrame(list_vendors(company_id=company_id))
+        if vdf.empty:
+            st.info("No vendors yet.")
+        else:
+            st.dataframe(vdf)
+
+        st.markdown("#### Staff")
+        sdf = pd.DataFrame(list_staff(company_id=company_id))
+        if sdf.empty:
+            st.info("No staff yet.")
+        else:
+            st.dataframe(sdf)
+
+        st.markdown("#### Accounts (Chart of Accounts)")
+        adf = pd.DataFrame(list_accounts(company_id=company_id))
+        if adf.empty:
+            st.info("No accounts yet.")
+        else:
+            st.dataframe(adf)
+
+
+# -------------------
 # User Management
 # -------------------
 
@@ -812,7 +903,7 @@ def main():
         st.session_state["user"] = None
         st.rerun()
 
-    menu = ["Vouchers", "Invoices", "CRM", "Account"]
+    menu = ["Vouchers", "Invoices", "CRM", "Reports", "Account"]
 
     if user.get("can_manage_users", False):
         menu.append("User Management")
@@ -828,6 +919,8 @@ def main():
         app_invoices()
     elif choice == "CRM":
         app_crm()
+    elif choice == "Reports":
+        app_reports()
     elif choice == "User Management":
         app_user_management()
     elif choice == "DB Browser":
