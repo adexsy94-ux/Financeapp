@@ -134,23 +134,50 @@ def app_vouchers():
 
         c1, c2, c3 = st.columns(3)
 
+        # -------- Base amount block --------
         with c1:
             st.markdown("**Base Amount (Vatable + Non-vatable)**")
             st.write(f"Invoice Amount: **{actual_total:,.2f} {cur_code}**")
-            st.write(f"Amount Paid via Vouchers: **{total_paid:,.2f} {cur_code}**")
-            st.write(f"Balance to Pay: **{actual_balance:,.2f} {cur_code}**")
+            st.markdown(
+                "Amount Paid via Vouchers: "
+                f"<span style='color: green; font-weight:bold;'>{total_paid:,.2f} {cur_code}</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "Balance to Pay: "
+                f"<span style='color: red; font-weight:bold;'>{actual_balance:,.2f} {cur_code}</span>",
+                unsafe_allow_html=True,
+            )
 
+        # -------- VAT block --------
         with c2:
             st.markdown("**VAT Allocation**")
             st.write(f"Invoice VAT: **{inv_vat_total:,.2f} {cur_code}**")
-            st.write(f"VAT Paid via Vouchers: **{vat_paid:,.2f} {cur_code}**")
-            st.write(f"VAT Balance: **{vat_balance:,.2f} {cur_code}**")
+            st.markdown(
+                "VAT Paid via Vouchers: "
+                f"<span style='color: green; font-weight:bold;'>{vat_paid:,.2f} {cur_code}</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "VAT Balance: "
+                f"<span style='color: red; font-weight:bold;'>{vat_balance:,.2f} {cur_code}</span>",
+                unsafe_allow_html=True,
+            )
 
+        # -------- WHT block --------
         with c3:
             st.markdown("**WHT Allocation**")
             st.write(f"Invoice WHT: **{inv_wht_total:,.2f} {cur_code}**")
-            st.write(f"WHT Deducted via Vouchers: **{wht_paid:,.2f} {cur_code}**")
-            st.write(f"WHT Balance: **{wht_balance:,.2f} {cur_code}**")
+            st.markdown(
+                "WHT Deducted via Vouchers: "
+                f"<span style='color: green; font-weight:bold;'>{wht_paid:,.2f} {cur_code}</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "WHT Balance: "
+                f"<span style='color: red; font-weight:bold;'>{wht_balance:,.2f} {cur_code}</span>",
+                unsafe_allow_html=True,
+            )
 
         st.markdown("---")
 
