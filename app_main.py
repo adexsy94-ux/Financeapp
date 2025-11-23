@@ -26,7 +26,6 @@ from crm_gateway import (
     list_staff,
     upsert_staff,
     delete_staff,
-    delete_account,
     get_vendor_name_list,
     get_requester_options,
     get_payable_account_options,
@@ -37,6 +36,10 @@ from vouchers_module import (
     create_voucher,
     change_voucher_status,
     delete_voucher,
+    get_invoice_allocations,
+    list_voucher_lines_for_invoice,
+    save_voucher_attachment,
+    get_voucher_attachments,
 )
 from invoices_module import (
     list_invoices,
@@ -243,6 +246,7 @@ def app_vouchers():
     vendor_options = get_vendor_name_list(company_id)
     requester_options = get_requester_options(company_id)
     account_options = get_expense_asset_account_options(company_id)
+    payable_options = get_payable_account_options(company_id)
 
     st.subheader("Create Voucher")
 
@@ -263,65 +267,74 @@ def app_vouchers():
     )
     invoice_ref = "" if invoice_choice == "(None)" else invoice_choice
 
-    # Find the selected invoice row (if any)
     selected_invoice = None
-    for inv in all_invoices:
-        if inv.get("invoice_number") == invoice_ref:
-            selected_invoice = inv
-            break
+    if invoice_ref:
+        for inv in all_invoices:
+            if inv.get("invoice_number") == invoice_ref:
+                selected_invoice = inv
+                break
 
-    # Display invoice allocation summary side by side
+    # -----------------------------
+    # Invoice Allocation Summary
+    # -----------------------------
+    invoice_currency = None
+    allocation = None
+    line_allocations = []
+
     if selected_invoice:
-        st.markdown("### Linked Invoice Allocation")
+        try:
+            invoice_currency = selected_invoice.get("currency", "NGN")
+            # Get aggregate allocations from helper
+            allocation = get_invoice_allocations(company_id, invoice_ref)
+            # Get any existing voucher lines for this invoice
+            line_allocations = list_voucher_lines_for_invoice(company_id, invoice_ref)
+        except Exception as e:
+            st.warning(f"Could not load invoice allocations: {e}")
+            allocation = None
 
-        inv_currency = selected_invoice.get("currency", "NGN")
-        cur_code = inv_currency
-
-        # Calculate totals
+    if selected_invoice and allocation:
         inv_vatable = float(selected_invoice.get("vatable_amount") or 0.0)
         inv_non_vatable = float(selected_invoice.get("non_vatable_amount") or 0.0)
         inv_vat_total = float(selected_invoice.get("vat_amount") or 0.0)
         inv_wht_total = float(selected_invoice.get("wht_amount") or 0.0)
 
-        # Build summary from vouchers for this invoice
-        vouchers_for_invoice = [
-            v for v in list_vouchers(company_id=company_id)
-            if v.get("invoice_ref") == invoice_ref
-        ]
+        actual_total = inv_vatable + inv_non_vatable
 
-        base_paid = 0.0
-        vat_paid = 0.0
-        wht_paid = 0.0
-        for v in vouchers_for_invoice:
-            base_paid += float(v.get("amount") or 0.0)
-            vat_paid += float(v.get("vat_amount") or 0.0)
-            wht_paid += float(v.get("wht_amount") or 0.0)
+        try:
+            amount_paid = float(allocation.get("amount_paid") or 0.0)
+            vat_paid = float(allocation.get("vat_paid") or 0.0)
+            wht_paid = float(allocation.get("wht_paid") or 0.0)
+        except Exception as e:
+            st.warning(f"Could not compute invoice allocation summary: {e}")
+            amount_paid = vat_paid = wht_paid = 0.0
 
-        base_balance = (inv_vatable + inv_non_vatable) - base_paid
+        # Balances
+        actual_balance = actual_total - amount_paid
         vat_balance = inv_vat_total - vat_paid
         wht_balance = inv_wht_total - wht_paid
 
+        cur_code = invoice_currency or "NGN"
+
+        st.markdown("### Invoice Allocation Summary")
+
         c1, c2, c3 = st.columns(3)
 
-        # Amount block (vatable + non-vatable)
+        # -------- Base amount block --------
         with c1:
-            st.markdown("**Base Amount Allocation**")
-            st.write(
-                f"Invoice Base (Vatable + Non-vatable): "
-                f"**{(inv_vatable + inv_non_vatable):,.2f} {cur_code}**"
-            )
+            st.markdown("**Base Amount (Vatable + Non-vatable)**")
+            st.write(f"Invoice Amount: **{actual_total:,.2f} {cur_code}**")
             st.markdown(
-                "Base Paid via Vouchers: "
-                f"<span style='color: green; font-weight:bold;'>{base_paid:,.2f} {cur_code}</span>",
+                "Amount Paid via Vouchers: "
+                f"<span style='color: green; font-weight:bold;'>{amount_paid:,.2f} {cur_code}</span>",
                 unsafe_allow_html=True,
             )
             st.markdown(
-                "Base Balance: "
-                f"<span style='color: red; font-weight:bold;'>{base_balance:,.2f} {cur_code}</span>",
+                "Balance to Pay: "
+                f"<span style='color: red; font-weight:bold;'>{actual_balance:,.2f} {cur_code}</span>",
                 unsafe_allow_html=True,
             )
 
-        # VAT block
+        # -------- VAT block --------
         with c2:
             st.markdown("**VAT Allocation**")
             st.write(f"Invoice VAT: **{inv_vat_total:,.2f} {cur_code}**")
@@ -336,7 +349,7 @@ def app_vouchers():
                 unsafe_allow_html=True,
             )
 
-        # WHT block
+        # -------- WHT block --------
         with c3:
             st.markdown("**WHT Allocation**")
             st.write(f"Invoice WHT: **{inv_wht_total:,.2f} {cur_code}**")
@@ -351,21 +364,35 @@ def app_vouchers():
                 unsafe_allow_html=True,
             )
 
+        # Show a detailed table of voucher line allocations if any
+        st.markdown("#### Detailed Voucher Line Allocations")
+        if line_allocations:
+            df_lines = pd.DataFrame(line_allocations)
+            st.dataframe(df_lines)
+        else:
+            st.info("No voucher lines found yet for this invoice.")
+
         st.markdown("---")
 
     # Determine default currency based on invoice or fallback
-    default_currency = "NGN"
-    if selected_invoice:
-        default_currency = selected_invoice.get("currency", "NGN")
+    currencies = ["NGN", "USD", "GBP", "EUR"]
+    default_index = 0
+    if invoice_currency in currencies:
+        default_index = currencies.index(invoice_currency)
 
     currency = st.selectbox(
-        "Voucher Currency",
-        ["NGN", "USD", "GBP", "EUR"],
-        index=["NGN", "USD", "GBP", "EUR"].index(default_currency),
+        "Currency",
+        currencies,
+        index=default_index,
+        help="Auto-fills from the selected invoice if available, but you can override.",
     )
 
     voucher_date = st.date_input("Voucher Date")
-    amount = st.number_input("Amount (Base)", min_value=0.0, format="%.2f")
+
+    st.markdown("### Voucher Amounts")
+    st.caption("Enter at least one of the amounts; the rest can be zero if not applicable.")
+
+    amount = st.number_input("Base Amount", min_value=0.0, format="%.2f")
     vat_amount = st.number_input("VAT Amount", min_value=0.0, format="%.2f")
     wht_amount = st.number_input("WHT Amount", min_value=0.0, format="%.2f")
 
@@ -373,19 +400,77 @@ def app_vouchers():
         "Expense/Asset Account (from CoA)",
         account_options,
     )
+    payable_account_code = st.selectbox(
+        "Payable Account (from CoA)",
+        payable_options,
+    )
 
     description = st.text_area("Description / Narration")
     bank_details = st.text_input("Bank Details (e.g. Bank Name - Account No.)")
 
-    if st.button("Create Voucher"):
-        if not vendor:
-            st.error("Vendor is required.")
-        elif amount <= 0 and vat_amount <= 0 and wht_amount <= 0:
-            st.error("Please enter at least one positive amount.")
+    # Attachment upload
+    uploaded = st.file_uploader(
+        "Attach supporting document (optional)", type=["pdf", "jpg", "png"]
+    )
+    file_name = None
+    file_bytes = None
+    if uploaded is not None:
+        file_name = uploaded.name
+        file_bytes = uploaded.read()
+
+    # ---------------------------
+    # Validation vs invoice
+    # ---------------------------
+    validation_errors = []
+    if selected_invoice and allocation:
+        inv_vatable = float(selected_invoice.get("vatable_amount") or 0.0)
+        inv_non_vatable = float(selected_invoice.get("non_vatable_amount") or 0.0)
+        inv_vat_total = float(selected_invoice.get("vat_amount") or 0.0)
+        inv_wht_total = float(selected_invoice.get("wht_amount") or 0.0)
+
+        actual_total = inv_vatable + inv_non_vatable
+        amount_paid = float(allocation.get("amount_paid") or 0.0)
+        vat_paid = float(allocation.get("vat_paid") or 0.0)
+        wht_paid = float(allocation.get("wht_paid") or 0.0)
+
+        actual_balance = actual_total - amount_paid
+        vat_balance = inv_vat_total - vat_paid
+        wht_balance = inv_wht_total - wht_paid
+
+        # If user enters more than the available balance, pre-warn
+        if amount > actual_balance + 1e-6:
+            validation_errors.append(
+                f"Base amount ({amount:,.2f}) is higher than the invoice base balance ({actual_balance:,.2f})."
+            )
+        if vat_amount > vat_balance + 1e-6:
+            validation_errors.append(
+                f"VAT amount ({vat_amount:,.2f}) is higher than the invoice VAT balance ({vat_balance:,.2f})."
+            )
+        if wht_amount > wht_balance + 1e-6:
+            validation_errors.append(
+                f"WHT amount ({wht_amount:,.2f}) is higher than the invoice WHT balance ({wht_balance:,.2f})."
+            )
+
+    if validation_errors:
+        st.markdown("### Allocation Warnings")
+        for err_msg in validation_errors:
+            st.error(err_msg)
+
+    # ---- Save button (only actually saves if validation passes) ----
+    save_clicked = st.button("Save Voucher")
+
+    if save_clicked:
+        if validation_errors:
+            # Do not call create_voucher – just explain
+            st.error(
+                "Voucher not saved because one or more line totals are higher than the "
+                "remaining invoice balances shown above. Please adjust the Amount, VAT, "
+                "or WHT so they are within the balances."
+            )
         else:
-            voucher_id = create_voucher(
+            err = create_voucher(
                 company_id=company_id,
-                created_by=username,
+                username=username,
                 vendor=vendor,
                 requester=requester,
                 invoice_ref=invoice_ref,
@@ -396,9 +481,28 @@ def app_vouchers():
                 wht_amount=wht_amount,
                 currency=currency,
                 expense_account_code=expense_account_code,
+                payable_account_code=payable_account_code,
                 voucher_date=voucher_date,
             )
-            st.success(f"Voucher {voucher_id} created successfully.")
+            if err is not None:
+                st.error(err)
+            else:
+                st.success("Voucher created successfully.")
+
+                # Save attachment if any
+                if file_name and file_bytes and invoice_ref:
+                    try:
+                        save_voucher_attachment(
+                            company_id=company_id,
+                            invoice_ref=invoice_ref,
+                            file_name=file_name,
+                            file_bytes=file_bytes,
+                        )
+                        st.success("Attachment uploaded successfully.")
+                    except Exception as e:
+                        st.error(f"Failed to save attachment: {e}")
+
+                st.experimental_rerun()
 
     st.markdown("## Existing Vouchers")
 
@@ -415,7 +519,9 @@ def app_vouchers():
     vch_ids = df_vch["voucher_id"].tolist()
     if vch_ids:
         selected_id = st.selectbox("Select Voucher ID", vch_ids)
-        new_status = st.selectbox("New Status", ["PENDING", "APPROVED", "REJECTED", "PAID"])
+        new_status = st.selectbox(
+            "New Status", ["PENDING", "APPROVED", "REJECTED", "PAID"]
+        )
         if st.button("Change Status"):
             change_voucher_status(company_id, selected_id, new_status)
             st.success("Status updated.")
@@ -431,15 +537,34 @@ def app_vouchers():
 
     # PDF download for voucher
     st.markdown("### Download Voucher PDF")
-    pdf_voucher_id = st.selectbox("Select Voucher ID for PDF", vch_ids)
-    if st.button("Generate PDF"):
-        pdf_bytes = build_voucher_pdf_bytes(company_id, pdf_voucher_id)
-        st.download_button(
-            label="Download Voucher PDF",
-            data=pdf_bytes,
-            file_name=f"voucher_{pdf_voucher_id}.pdf",
-            mime="application/pdf",
-        )
+    pdf_voucher_id = st.selectbox("Select Voucher ID for PDF", vch_ids, key="pdf_voucher_id")
+    if st.button("Download Voucher PDF"):
+        try:
+            pdf_bytes = build_voucher_pdf_bytes(
+                company_id=company_id, voucher_id=int(pdf_voucher_id)
+            )
+        except Exception as e:
+            st.error(f"Error generating PDF: {e}")
+        else:
+            st.download_button(
+                label="Download PDF",
+                data=pdf_bytes,
+                file_name=f"voucher_{pdf_voucher_id}.pdf",
+                mime="application/pdf",
+            )
+
+    # List attachments for the selected invoice (if any)
+    if invoice_ref:
+        st.markdown("### Attachments for Selected Invoice")
+        try:
+            attachments = get_voucher_attachments(company_id, invoice_ref)
+            if attachments:
+                df_att = pd.DataFrame(attachments)
+                st.dataframe(df_att)
+            else:
+                st.info("No attachments found for this invoice.")
+        except Exception as e:
+            st.error(f"Error loading attachments: {e}")
 
 
 # ----------
@@ -464,24 +589,31 @@ def app_invoices():
 
     if edit_mode and not df_inv.empty:
         inv_choice = st.selectbox("Select Invoice to edit", df_inv["invoice_number"])
-        selected_invoice = df_inv[df_inv["invoice_number"] == inv_choice].iloc[0].to_dict()
+        selected_invoice = (
+            df_inv[df_inv["invoice_number"] == inv_choice].iloc[0].to_dict()
+        )
         invoice_number = selected_invoice["invoice_number"]
     else:
         invoice_number = st.text_input("Invoice Number (leave blank if editing)")
 
     vendor_options = get_vendor_name_list(company_id)
+    if selected_invoice and selected_invoice.get("vendor") in vendor_options:
+        vendor_index = vendor_options.index(selected_invoice["vendor"])
+    else:
+        vendor_index = 0
+
     vendor = st.selectbox(
         "Vendor",
         vendor_options,
-        index=vendor_options.index(selected_invoice["vendor"])
-        if selected_invoice and selected_invoice.get("vendor") in vendor_options
-        else 0,
+        index=vendor_index,
     )
 
     currency_options = ["NGN", "USD", "GBP", "EUR"]
-    currency_index = 0
     if selected_invoice and selected_invoice.get("currency") in currency_options:
         currency_index = currency_options.index(selected_invoice["currency"])
+    else:
+        currency_index = 0
+
     currency = st.selectbox("Currency", currency_options, index=currency_index)
 
     inv_date = st.date_input(
@@ -552,21 +684,21 @@ def app_invoices():
             else:
                 if not invoice_number:
                     st.error("Invoice number is required for new invoices.")
-                    return
-                create_invoice(
-                    company_id=company_id,
-                    invoice_number=invoice_number,
-                    vendor=vendor,
-                    currency=currency,
-                    invoice_date=inv_date,
-                    due_date=due_date,
-                    vatable_amount=vatable_amount,
-                    non_vatable_amount=non_vatable_amount,
-                    vat_amount=vat_amount,
-                    wht_amount=wht_amount,
-                    remarks=remarks,
-                )
-                st.success("Invoice created.")
+                else:
+                    create_invoice(
+                        company_id=company_id,
+                        invoice_number=invoice_number,
+                        vendor=vendor,
+                        currency=currency,
+                        invoice_date=inv_date,
+                        due_date=due_date,
+                        vatable_amount=vatable_amount,
+                        non_vatable_amount=non_vatable_amount,
+                        vat_amount=vat_amount,
+                        wht_amount=wht_amount,
+                        remarks=remarks,
+                    )
+                    st.success("Invoice created.")
             st.experimental_rerun()
 
     st.markdown("### Existing Invoices")
@@ -670,7 +802,6 @@ def main():
     require_login()
     user = current_user()
     if not user:
-        # If somehow not authenticated, do nothing.
         st.stop()
 
     company_id = user["company_id"]
