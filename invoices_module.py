@@ -32,6 +32,15 @@ def _now_ts() -> datetime:
     return datetime.utcnow()
 
 
+def generate_invoice_number(company_id: int) -> str:
+    """
+    Simple timestamp-based invoice number, unique per company in practice.
+    """
+    now = datetime.utcnow()
+    # You can later prefix with company code if needed
+    return now.strftime("INV-%Y%m%d%H%M%S")
+
+
 def compute_invoice_totals(
     vatable_amount: float,
     non_vatable_amount: float,
@@ -85,26 +94,8 @@ def create_invoice(
     """
     Create a new invoice and return its ID.
 
-    Signature is aligned with app_main.py:
-
-        iid = create_invoice(
-            company_id=company_id,
-            invoice_number=invoice_number,
-            vendor_invoice_number=vendor_invoice_number,
-            vendor=vendor,
-            summary=summary,
-            vatable_amount=vatable_amount,
-            vat_rate=vat_rate,
-            wht_rate=wht_rate,
-            non_vatable_amount=non_vatable_amount,
-            terms=terms,
-            payable_account=payable_account,
-            expense_asset_account=expense_asset_account,
-            currency=currency,
-            username=username,
-            file_name=file_name,
-            file_data=file_data,
-        )
+    If invoice_number is blank/empty, it will be auto-generated using a timestamp
+    (e.g. INV-20251123103858).
     """
 
     invoice_number = (invoice_number or "").strip()
@@ -116,10 +107,11 @@ def create_invoice(
     expense_asset_account = (expense_asset_account or "").strip() or None
     currency = (currency or "").strip() or "NGN"
 
-    if not invoice_number:
-        raise ValueError("Invoice number is required.")
     if not vendor:
         raise ValueError("Vendor is required.")
+
+    if not invoice_number:
+        invoice_number = generate_invoice_number(company_id)
 
     # Validate vendor exists in CRM
     vendor_opts = get_vendor_name_list(company_id)
@@ -258,8 +250,7 @@ def list_invoices(company_id: int) -> List[Dict]:
     """
     List invoices for a company.
 
-    IMPORTANT: only select columns that actually exist in the DB schema:
-    there is NO 'created_at' column on the invoices table, only 'last_modified'.
+    Only select columns that actually exist in the DB schema.
     """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
@@ -354,26 +345,12 @@ def list_invoices(company_id: int) -> List[Dict]:
 def update_invoice(*args: Any, **kwargs: Any) -> None:
     """
     Placeholder update_invoice.
-
-    app_main.py imports this symbol; without it, the app crashes on import.
-    We accept *args and **kwargs so any call signature will be accepted.
-
-    For now, this is a NO-OP. Once we see the exact way app_invoices()
-    calls update_invoice (from a traceback), we can wire real update logic.
     """
-    # NO-OP: you can replace this later with a full update implementation.
     return None
 
 
 def delete_invoice(*args: Any, **kwargs: Any) -> None:
     """
     Placeholder delete_invoice.
-
-    app_main.py imports this symbol; without it, the app crashes on import.
-    We accept *args and **kwargs so any call signature will be accepted.
-
-    For now, this is a NO-OP. Once we see the exact way app_invoices()
-    calls delete_invoice (from a traceback), we can wire real delete logic.
     """
-    # NO-OP: you can replace this later with a full delete implementation.
     return None
