@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS vouchers (
     file_name       TEXT,
     file_data       BYTEA,
 
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     last_modified   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     approved_by     TEXT,
     approved_at     TIMESTAMPTZ,
@@ -252,9 +253,11 @@ def init_schema() -> None:
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS company_id INTEGER;")
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS status TEXT;")
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS position TEXT;")
+        cur.execute(
+            "ALTER TABLE staff ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;"
+        )
 
         # --- Lightweight migrations for existing vouchers table ---
-        # Add all columns the code expects, but only if missing.
         cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS parent_id INTEGER;")
         cur.execute(
             "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;"
@@ -274,11 +277,27 @@ def init_schema() -> None:
         cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS file_name TEXT;")
         cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS file_data BYTEA;")
         cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;"
+        )
+        cur.execute(
             "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS last_modified TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;"
         )
         cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS approved_by TEXT;")
         cur.execute(
             "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;"
+        )
+
+        # --- Lightweight migrations for existing voucher_lines table ---
+        cur.execute(
+            "ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS line_no INTEGER;"
+        )
+        cur.execute(
+            "ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS total NUMERIC(18,2);"
+        )
+
+        # --- Lightweight migrations for voucher_documents table ---
+        cur.execute(
+            "ALTER TABLE voucher_documents ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;"
         )
 
         conn.commit()
