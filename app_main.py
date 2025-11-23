@@ -92,7 +92,7 @@ def app_vouchers():
                 "WHT %", key=f"line_wht_{i}", min_value=0.0, step=0.5
             )
 
-        # IMPORTANT: keys must match vouchers_module.create_voucher expectations
+        # Keys must match vouchers_module.create_voucher expectations
         lines.append(
             {
                 "description": desc,
@@ -291,7 +291,6 @@ def app_invoices():
     idf = pd.DataFrame(list_invoices(company_id=company_id))
     if not idf.empty:
         if "total_amount" in idf.columns:
-            # simple in-place money formatting so we don't depend on reporting_utils.money
             idf["total_amount_fmt"] = idf["total_amount"].apply(
                 lambda v: f"{v:,.2f}" if v is not None else ""
             )
@@ -346,7 +345,11 @@ def app_crm():
     with st.form("account_form"):
         code = st.text_input("Account Code")
         name = st.text_input("Account Name")
-        acc_type = st.selectbox("Type", ["payable", "expense", "asset"], index=0)
+        acc_type = st.selectbox(
+            "Type",
+            ["Asset", "Liability", "Equity", "Expense", "Income"],
+            index=0,
+        )
         submitted = st.form_submit_button("Save Account")
         if submitted:
             if not code or not name:
@@ -361,15 +364,29 @@ def app_crm():
                 )
                 st.success("Account saved.")
 
-    st.markdown("**Payable Accounts**")
-    pdf = pd.DataFrame(list_accounts("payable", company_id=company_id))
-    if not pdf.empty:
-        st.dataframe(pdf)
+    # Fetch all accounts once
+    all_accounts = list_accounts(company_id=company_id)
 
-    st.markdown("**Expense/Asset Accounts**")
-    exdf = pd.DataFrame(list_accounts("expense", company_id=company_id))
-    if not exdf.empty:
-        st.dataframe(exdf)
+    # Payable = Liability / Equity (same logic as get_payable_account_options)
+    payable_accounts = [
+        a for a in all_accounts if a.get("type") in ("Liability", "Equity")
+    ]
+    # Expense/Asset
+    expense_asset_accounts = [
+        a for a in all_accounts if a.get("type") in ("Expense", "Asset")
+    ]
+
+    st.markdown("**Payable Accounts (Liability / Equity)**")
+    if payable_accounts:
+        st.dataframe(pd.DataFrame(payable_accounts))
+    else:
+        st.info("No payable accounts yet.")
+
+    st.markdown("**Expense & Asset Accounts**")
+    if expense_asset_accounts:
+        st.dataframe(pd.DataFrame(expense_asset_accounts))
+    else:
+        st.info("No expense or asset accounts yet.")
 
 
 # -------------------
