@@ -25,18 +25,15 @@ def _to_float(v):
 
 
 def build_voucher_pdf_bytes(company_id: int, voucher_id: int) -> bytes:
-    data = get_voucher_with_lines(company_id, voucher_id)
-    if not data:
+    header, lines = get_voucher_with_lines(company_id, voucher_id)
+    if not header:
         raise ValueError(f"Voucher {voucher_id} not found for this company.")
-
-    header = data["header"]
-    lines = data["lines"]
 
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # --------------- Header ---------------
+    # --------------- Header ----------------
     c.setFont("Helvetica-Bold", 16)
     c.drawString(20 * mm, height - 25 * mm, "Payment Voucher")
 
@@ -68,8 +65,8 @@ def build_voucher_pdf_bytes(company_id: int, voucher_id: int) -> bytes:
     c.drawString(20 * mm, y, f"Currency: {currency}")
     y -= 10 * mm
 
-    # --------------- Lines table ---------------
-    data_rows = [
+    # --------------- Lines table ----------------
+    data = [
         ["Description", "Amount", "Account", "VAT %", "WHT %", "Total"],
     ]
 
@@ -84,7 +81,7 @@ def build_voucher_pdf_bytes(company_id: int, voucher_id: int) -> bytes:
 
         total_sum += total
 
-        data_rows.append(
+        data.append(
             [
                 desc,
                 f"{amount:,.2f}",
@@ -95,10 +92,10 @@ def build_voucher_pdf_bytes(company_id: int, voucher_id: int) -> bytes:
             ]
         )
 
-    data_rows.append(["", "", "", "", "Grand Total", f"{total_sum:,.2f}"])
+    data.append(["", "", "", "", "Grand Total", f"{total_sum:,.2f}"])
 
     table = Table(
-        data_rows,
+        data,
         colWidths=[60 * mm, 25 * mm, 40 * mm, 20 * mm, 20 * mm, 30 * mm],
     )
     table.setStyle(
@@ -114,7 +111,7 @@ def build_voucher_pdf_bytes(company_id: int, voucher_id: int) -> bytes:
     )
 
     table.wrapOn(c, width - 40 * mm, y - 20 * mm)
-    table_height = len(data_rows) * 8 * mm
+    table_height = len(data) * 8 * mm
     table.drawOn(c, 20 * mm, max(20 * mm, y - table_height))
 
     c.showPage()
