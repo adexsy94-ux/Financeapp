@@ -254,6 +254,10 @@ def create_invoice(
 # List / query invoices
 # ------------------------
 
+from contextlib import closing
+from typing import List, Dict
+from db_config import connect
+
 def list_invoices(company_id: int) -> List[Dict]:
     """
     List invoices for a company.
