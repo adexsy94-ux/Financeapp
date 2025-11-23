@@ -22,6 +22,7 @@ from crm_gateway import (
     delete_vendor,
     list_accounts,
     upsert_account,
+    delete_account,
     list_staff,
     upsert_staff,
     delete_staff,
@@ -46,9 +47,191 @@ from invoices_module import (
 from pdf_utils import build_voucher_pdf_bytes
 
 
-# -------------------
+# ----------
+# Helpers
+# ----------
+
+def get_connection():
+    """
+    Returns a psycopg2 connection using the shared connect() helper.
+    All app code should call this instead of opening connections directly.
+    """
+    return connect()
+
+
+def logout_button():
+    if st.sidebar.button("Logout"):
+        st.session_state["authenticated"] = False
+        st.session_state["user"] = None
+        st.experimental_rerun()
+
+
+# ----------
+# CRM (Vendors, Accounts, Staff)
+# ----------
+
+def app_crm():
+    require_permission("can_manage_crm")
+    user = current_user()
+    company_id = user["company_id"]
+
+    st.title("CRM & Master Data")
+
+    tabs = st.tabs(["Vendors", "Chart of Accounts", "Staff"])
+
+    # Vendors tab
+    with tabs[0]:
+        st.subheader("Vendors")
+        vendors = list_vendors(company_id=company_id)
+        df_v = pd.DataFrame(vendors)
+        if not df_v.empty:
+            st.dataframe(df_v)
+        else:
+            st.info("No vendors found for your company yet.")
+
+        st.markdown("### Add / Update Vendor")
+        with st.form("vendor_form"):
+            vendor_id = st.text_input("Vendor ID (leave blank to create new)")
+            name = st.text_input("Vendor Name")
+            email = st.text_input("Email")
+            phone = st.text_input("Phone")
+            address = st.text_area("Address")
+            submit_v = st.form_submit_button("Save Vendor")
+
+        if submit_v:
+            if not name:
+                st.error("Vendor name is required.")
+            else:
+                upsert_vendor(
+                    company_id=company_id,
+                    vendor_id=vendor_id.strip() or None,
+                    name=name.strip(),
+                    email=email.strip(),
+                    phone=phone.strip(),
+                    address=address.strip(),
+                )
+                st.success("Vendor saved successfully.")
+                st.experimental_rerun()
+
+        st.markdown("### Delete Vendor")
+        if not df_v.empty:
+            vendor_to_delete = st.selectbox(
+                "Select Vendor to delete",
+                df_v["id"].astype(str) + " - " + df_v["name"],
+            )
+            if st.button("Delete Vendor"):
+                vid = vendor_to_delete.split(" - ")[0]
+                delete_vendor(company_id, vid)
+                st.success("Vendor deleted.")
+                st.experimental_rerun()
+        else:
+            st.info("No vendors available to delete.")
+
+    # Chart of Accounts tab
+    with tabs[1]:
+        st.subheader("Chart of Accounts")
+        accounts = list_accounts(company_id=company_id)
+        df_a = pd.DataFrame(accounts)
+        if not df_a.empty:
+            st.dataframe(df_a)
+        else:
+            st.info("No accounts defined yet.")
+
+        st.markdown("### Add / Update Account")
+        with st.form("account_form"):
+            account_id = st.text_input("Account ID (leave blank to create new)")
+            code = st.text_input("Account Code")
+            name = st.text_input("Account Name")
+            account_type = st.selectbox(
+                "Account Type",
+                ["Asset", "Liability", "Equity", "Income", "Expense"],
+            )
+            is_payable = st.checkbox("Is Payable Account?")
+            is_expense_asset = st.checkbox("Is Expense/Asset Account?")
+            submit_a = st.form_submit_button("Save Account")
+
+        if submit_a:
+            if not code or not name:
+                st.error("Account code and name are required.")
+            else:
+                upsert_account(
+                    company_id=company_id,
+                    account_id=account_id.strip() or None,
+                    code=code.strip(),
+                    name=name.strip(),
+                    account_type=account_type,
+                    is_payable=is_payable,
+                    is_expense_asset=is_expense_asset,
+                )
+                st.success("Account saved successfully.")
+                st.experimental_rerun()
+
+        st.markdown("### Delete Account")
+        if not df_a.empty:
+            acc_to_delete = st.selectbox(
+                "Select Account to delete",
+                df_a["id"].astype(str) + " - " + df_a["code"] + " " + df_a["name"],
+            )
+            if st.button("Delete Account"):
+                aid = acc_to_delete.split(" - ")[0]
+                delete_account(company_id, aid)
+                st.success("Account deleted.")
+                st.experimental_rerun()
+        else:
+            st.info("No accounts available to delete.")
+
+    # Staff tab
+    with tabs[2]:
+        st.subheader("Staff")
+        staff_list = list_staff(company_id=company_id)
+        df_s = pd.DataFrame(staff_list)
+        if not df_s.empty:
+            st.dataframe(df_s)
+        else:
+            st.info("No staff found yet.")
+
+        st.markdown("### Add / Update Staff")
+        with st.form("staff_form"):
+            staff_id = st.text_input("Staff ID (leave blank to create new)")
+            name = st.text_input("Staff Name")
+            email = st.text_input("Email")
+            phone = st.text_input("Phone")
+            role = st.text_input("Role / Position")
+            submit_s = st.form_submit_button("Save Staff")
+
+        if submit_s:
+            if not name:
+                st.error("Staff name is required.")
+            else:
+                upsert_staff(
+                    company_id=company_id,
+                    staff_id=staff_id.strip() or None,
+                    name=name.strip(),
+                    email=email.strip(),
+                    phone=phone.strip(),
+                    role=role.strip(),
+                )
+                st.success("Staff saved successfully.")
+                st.experimental_rerun()
+
+        st.markdown("### Delete Staff")
+        if not df_s.empty:
+            staff_to_delete = st.selectbox(
+                "Select Staff to delete",
+                df_s["id"].astype(str) + " - " + df_s["name"],
+            )
+            if st.button("Delete Staff"):
+                sid = staff_to_delete.split(" - ")[0]
+                delete_staff(company_id, sid)
+                st.success("Staff deleted.")
+                st.experimental_rerun()
+        else:
+            st.info("No staff available to delete.")
+
+
+# ----------
 # Vouchers
-# -------------------
+# ----------
 
 def app_vouchers():
     require_permission("can_create_voucher")
@@ -83,93 +266,62 @@ def app_vouchers():
     # Find the selected invoice row (if any)
     selected_invoice = None
     for inv in all_invoices:
-        if inv.get("invoice_number") == invoice_choice:
+        if inv.get("invoice_number") == invoice_ref:
             selected_invoice = inv
             break
 
-    # Determine invoice currency if invoice is selected
-    invoice_currency = None
-    if selected_invoice is not None:
-        invoice_currency = (selected_invoice.get("currency") or "NGN").upper()
+    # Display invoice allocation summary side by side
+    if selected_invoice:
+        st.markdown("### Linked Invoice Allocation")
 
-    # Balances we’ll use for validation
-    actual_balance = None
-    vat_balance = None
-    wht_balance = None
+        inv_currency = selected_invoice.get("currency", "NGN")
+        cur_code = inv_currency
 
-    # ---- Invoice allocation summary (amounts, paid, balances) ----
-    if selected_invoice is not None:
+        # Calculate totals
         inv_vatable = float(selected_invoice.get("vatable_amount") or 0.0)
         inv_non_vatable = float(selected_invoice.get("non_vatable_amount") or 0.0)
         inv_vat_total = float(selected_invoice.get("vat_amount") or 0.0)
         inv_wht_total = float(selected_invoice.get("wht_amount") or 0.0)
 
-        # Base (invoice) amount = vatable + non-vatable
-        actual_total = inv_vatable + inv_non_vatable
+        # Build summary from vouchers for this invoice
+        vouchers_for_invoice = [
+            v for v in list_vouchers(company_id=company_id)
+            if v.get("invoice_ref") == invoice_ref
+        ]
 
-        amount_paid = 0.0
+        base_paid = 0.0
         vat_paid = 0.0
         wht_paid = 0.0
+        for v in vouchers_for_invoice:
+            base_paid += float(v.get("amount") or 0.0)
+            vat_paid += float(v.get("vat_amount") or 0.0)
+            wht_paid += float(v.get("wht_amount") or 0.0)
 
-        # Sum voucher_lines for vouchers referencing this invoice (same company + currency, non-rejected)
-        try:
-            with connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT
-                            COALESCE(SUM(vl.amount), 0)     AS amount_paid,
-                            COALESCE(SUM(vl.vat_value), 0)  AS vat_paid,
-                            COALESCE(SUM(vl.wht_value), 0)  AS wht_paid
-                        FROM voucher_lines vl
-                        JOIN vouchers v
-                          ON v.id = vl.voucher_id
-                        WHERE v.company_id = %s
-                          AND v.invoice_ref = %s
-                          AND v.currency = %s
-                          AND (v.status IS NULL OR v.status <> 'rejected')
-                        """,
-                        (
-                            company_id,
-                            invoice_choice,
-                            invoice_currency or "NGN",
-                        ),
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        amount_paid = float(row[0] or 0.0)
-                        vat_paid = float(row[1] or 0.0)
-                        wht_paid = float(row[2] or 0.0)
-        except Exception as e:
-            st.warning(f"Could not compute invoice allocation summary: {e}")
-
-        # Balances
-        actual_balance = actual_total - amount_paid
+        base_balance = (inv_vatable + inv_non_vatable) - base_paid
         vat_balance = inv_vat_total - vat_paid
         wht_balance = inv_wht_total - wht_paid
 
-        cur_code = invoice_currency or "NGN"
-
-        st.markdown("### Invoice Allocation Summary")
-
         c1, c2, c3 = st.columns(3)
 
-        # -------- Base amount block --------
+        # Amount block (vatable + non-vatable)
         with c1:
-            st.markdown("**Base Amount (Vatable + Non-vatable)**")
-            st.write(f"Invoice Amount: **{actual_total:,.2f} {cur_code}**")
+            st.markdown("**Base Amount Allocation**")
+            st.write(
+                f"Invoice Base (Vatable + Non-vatable): "
+                f"**{(inv_vatable + inv_non_vatable):,.2f} {cur_code}**"
+            )
             st.markdown(
-                "Amount Paid via Vouchers: "
-                f"<span style='color: green; font-weight:bold;'>{amount_paid:,.2f} {cur_code}</span>",
+                "Base Paid via Vouchers: "
+                f"<span style='color: green; font-weight:bold;'>{base_paid:,.2f} {cur_code}</span>",
                 unsafe_allow_html=True,
             )
             st.markdown(
-                "Balance to Pay: "
-                f"<span style='color: red; font-weight:bold;'>{actual_balance:,.2f} {cur_code}</span>",
+                "Base Balance: "
+                f"<span style='color: red; font-weight:bold;'>{base_balance:,.2f} {cur_code}</span>",
                 unsafe_allow_html=True,
             )
 
-        # -------- VAT block --------
+        # VAT block
         with c2:
             st.markdown("**VAT Allocation**")
             st.write(f"Invoice VAT: **{inv_vat_total:,.2f} {cur_code}**")
@@ -184,7 +336,7 @@ def app_vouchers():
                 unsafe_allow_html=True,
             )
 
-        # -------- WHT block --------
+        # WHT block
         with c3:
             st.markdown("**WHT Allocation**")
             st.write(f"Invoice WHT: **{inv_wht_total:,.2f} {cur_code}**")
@@ -201,751 +353,343 @@ def app_vouchers():
 
         st.markdown("---")
 
-    # Determine default currency based on selected invoice (if any)
-    base_currencies = ["NGN", "USD", "GBP", "EUR"]
-    currencies = base_currencies.copy()
-    if invoice_currency and invoice_currency not in currencies:
-        currencies.append(invoice_currency)
-
-    default_currency = invoice_currency or "NGN"
-    try:
-        default_index = currencies.index(default_currency)
-    except ValueError:
-        default_index = 0
+    # Determine default currency based on invoice or fallback
+    default_currency = "NGN"
+    if selected_invoice:
+        default_currency = selected_invoice.get("currency", "NGN")
 
     currency = st.selectbox(
-        "Currency",
-        currencies,
-        index=default_index,
-        help="Auto-fills from the selected invoice if available, but you can override.",
+        "Voucher Currency",
+        ["NGN", "USD", "GBP", "EUR"],
+        index=["NGN", "USD", "GBP", "EUR"].index(default_currency),
     )
 
-    uploaded = st.file_uploader(
-        "Attach supporting document (optional)", type=["pdf", "jpg", "png"]
-    )
-    file_name = None
-    file_bytes = None
-    if uploaded is not None:
-        file_name = uploaded.name
-        file_bytes = uploaded.read()
+    voucher_date = st.date_input("Voucher Date")
+    amount = st.number_input("Amount (Base)", min_value=0.0, format="%.2f")
+    vat_amount = st.number_input("VAT Amount", min_value=0.0, format="%.2f")
+    wht_amount = st.number_input("WHT Amount", min_value=0.0, format="%.2f")
 
-    st.markdown("**Voucher Lines**")
-    lines = []
-    num_lines = st.number_input(
-        "Number of lines", min_value=1, max_value=20, value=1, step=1
-    )
-    for i in range(int(num_lines)):
-        st.markdown(f"**Line {i+1}**")
-        col1, col2, col3, col4, col5 = st.columns([3, 1, 2, 1, 1])
-        with col1:
-            desc = st.text_input("Description", key=f"line_desc_{i}")
-        with col2:
-            amt = st.number_input(
-                "Amount", key=f"line_amt_{i}", min_value=0.0, step=0.01
-            )
-        with col3:
-            acct = st.selectbox(
-                "Expense / Asset Account (Chart of Accounts)",
-                account_options,
-                key=f"line_acct_{i}",
-            )
-        with col4:
-            vat = st.number_input(
-                "VAT %", key=f"line_vat_{i}", min_value=0.0, step=0.5
-            )
-        with col5:
-            wht = st.number_input(
-                "WHT %", key=f"line_wht_{i}", min_value=0.0, step=0.5
-            )
-
-        lines.append(
-            {
-                "description": desc,
-                "amount": amt,
-                "account_name": acct,
-                "vat_percent": vat,
-                "wht_percent": wht,
-            }
-        )
-
-    # ---- Pre-calculate totals on the current voucher lines ----
-    total_line_amount = sum((l.get("amount") or 0.0) for l in lines)
-    total_line_vat = sum(
-        round((l.get("amount") or 0.0) * (l.get("vat_percent") or 0.0) / 100.0, 2)
-        for l in lines
-    )
-    total_line_wht = sum(
-        round((l.get("amount") or 0.0) * (l.get("wht_percent") or 0.0) / 100.0, 2)
-        for l in lines
+    expense_account_code = st.selectbox(
+        "Expense/Asset Account (from CoA)",
+        account_options,
     )
 
-    # ---- Validation against invoice balances ----
-    validation_errors = []
-    if selected_invoice is not None:
-        cur_code = invoice_currency or "NGN"
+    description = st.text_area("Description / Narration")
+    bank_details = st.text_input("Bank Details (e.g. Bank Name - Account No.)")
 
-        # Base amount (Amount column) vs Base Balance
-        if actual_balance is not None and total_line_amount > actual_balance + 0.0001:
-            validation_errors.append(
-                f"Total Amount in voucher lines ({total_line_amount:,.2f} {cur_code}) "
-                f"is greater than the Base Balance to Pay ({actual_balance:,.2f} {cur_code})."
-            )
-
-        # VAT vs VAT Balance
-        if vat_balance is not None and total_line_vat > vat_balance + 0.0001:
-            validation_errors.append(
-                f"Total VAT amount in voucher lines ({total_line_vat:,.2f} {cur_code}) "
-                f"is greater than the VAT Balance ({vat_balance:,.2f} {cur_code})."
-            )
-
-        # WHT vs WHT Balance
-        if wht_balance is not None and total_line_wht > wht_balance + 0.0001:
-            validation_errors.append(
-                f"Total WHT amount in voucher lines ({total_line_wht:,.2f} {cur_code}) "
-                f"is greater than the WHT Balance ({wht_balance:,.2f} {cur_code})."
-            )
-
-    # Show validation errors immediately so user knows why save won't work
-    if validation_errors:
-        for msg in validation_errors:
-            st.error(msg)
-
-    # ---- Save button (only actually saves if validation passes) ----
-    save_clicked = st.button("Save Voucher")
-
-    if save_clicked:
-        if validation_errors:
-            # Do not call create_voucher – just explain
-            st.error(
-                "Voucher not saved because one or more line totals are higher than the "
-                "remaining invoice balances shown above. Please adjust the Amount, VAT, "
-                "or WHT so they are within the balances."
-            )
+    if st.button("Create Voucher"):
+        if not vendor:
+            st.error("Vendor is required.")
+        elif amount <= 0 and vat_amount <= 0 and wht_amount <= 0:
+            st.error("Please enter at least one positive amount.")
         else:
-            err = create_voucher(
+            voucher_id = create_voucher(
                 company_id=company_id,
-                username=username,
+                created_by=username,
                 vendor=vendor,
                 requester=requester,
                 invoice_ref=invoice_ref,
+                description=description,
+                bank_details=bank_details,
+                amount=amount,
+                vat_amount=vat_amount,
+                wht_amount=wht_amount,
                 currency=currency,
-                lines=lines,
-                file_name=file_name,
-                file_bytes=file_bytes,
+                expense_account_code=expense_account_code,
+                voucher_date=voucher_date,
             )
-            if err:
-                st.error(err)
-            else:
-                st.success("Voucher created successfully.")
+            st.success(f"Voucher {voucher_id} created successfully.")
 
-    st.markdown("---")
-    st.subheader("Recent Vouchers")
+    st.markdown("## Existing Vouchers")
 
-    vdf = pd.DataFrame(list_vouchers(company_id=company_id))
-    if not vdf.empty:
-        display_cols = [c for c in vdf.columns if c not in ("file_data",)]
-        st.dataframe(vdf[display_cols])
-
-        st.markdown("**Update Voucher Status**")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            selected_id = st.number_input(
-                "Voucher ID",
-                min_value=0,
-                step=1,
-                value=0,
-                help="Enter the voucher ID you want to act on.",
-            )
-        with col2:
-            action = st.selectbox(
-                "Action",
-                ["--", "Submit for approval", "Mark as draft", "Approve", "Reject"],
-            )
-        with col3:
-            st.write(" ")
-
-        if st.button("Apply Action on Voucher"):
-            if selected_id <= 0:
-                st.error("Please enter a valid voucher ID.")
-            elif action == "--":
-                st.error("Please select an action.")
-            else:
-                new_status = None
-
-                if action == "Submit for approval":
-                    new_status = "submitted"
-                elif action == "Mark as draft":
-                    new_status = "draft"
-                elif action == "Approve":
-                    require_permission("can_approve_voucher")
-                    new_status = "approved"
-                elif action == "Reject":
-                    require_permission("can_approve_voucher")
-                    new_status = "rejected"
-
-                if new_status is None:
-                    st.error("Unknown action.")
-                else:
-                    err = change_voucher_status(
-                        company_id=company_id,
-                        voucher_id=int(selected_id),
-                        new_status=new_status,
-                        actor_username=username,
-                    )
-                    if err:
-                        st.error(err)
-                    else:
-                        st.success(
-                            f"Voucher {selected_id} updated to status '{new_status}'."
-                        )
-                        st.experimental_rerun()
-
-        st.markdown("**Export to PDF**")
-        pdf_id = st.number_input(
-            "Voucher ID to export",
-            min_value=0,
-            step=1,
-            value=0,
-            key="pdf_voucher_id",
-        )
-        if pdf_id > 0 and st.button("Download Voucher PDF"):
-            try:
-                pdf_bytes = build_voucher_pdf_bytes(
-                    company_id=company_id, voucher_id=int(pdf_id)
-                )
-            except Exception as e:
-                st.error(f"Error generating PDF: {e}")
-            else:
-                st.download_button(
-                    label="Download PDF",
-                    data=pdf_bytes,
-                    file_name=f"voucher_{pdf_id}.pdf",
-                    mime="application/pdf",
-                )
-    else:
-        st.info("No vouchers yet.")
-
-
-# -------------------
-# Invoices
-# -------------------
-
-def app_invoices():
-    require_permission("can_create_voucher")
-    user = current_user()
-    username = user["username"]
-    company_id = user["company_id"]
-
-    # CRM-driven dropdown options
-    vendor_options = get_vendor_name_list(company_id)
-    payable_options = get_payable_account_options(company_id)
-    expense_asset_options = get_expense_asset_account_options(company_id)
-
-    st.subheader("Create Invoice")
-
-    st.info("Invoice number will be auto-generated using date and time when you save.")
-
-    vendor = st.selectbox("Vendor (from CRM)", vendor_options)
-    vendor_invoice_number = st.text_input("Vendor Invoice Number")
-    summary = st.text_area("Summary")
-
-    vatable_amount = st.number_input("Vatable Amount", min_value=0.0, step=0.01)
-    vat_rate = st.number_input("VAT Rate (%)", min_value=0.0, step=0.5)
-    wht_rate = st.number_input("WHT Rate (%)", min_value=0.0, step=0.5)
-    non_vatable_amount = st.number_input(
-        "Non-vatable Amount", min_value=0.0, step=0.01
-    )
-
-    terms = st.text_area("Terms")
-    currency = st.selectbox("Currency", ["NGN", "USD", "GBP", "EUR"], index=0)
-
-    payable_account = st.selectbox(
-        "Payable Account (Chart of Accounts)", payable_options
-    )
-    expense_asset_account = st.selectbox(
-        "Expense / Asset Account (Chart of Accounts)",
-        expense_asset_options,
-    )
-
-    uploaded = st.file_uploader(
-        "Attach invoice document (optional)",
-        type=["pdf", "jpg", "png"],
-        key="inv_file",
-    )
-    file_name = None
-    file_bytes = None
-    if uploaded is not None:
-        file_name = uploaded.name
-        file_bytes = uploaded.read()
-
-    if st.button("Save Invoice"):
-        err = None
-        try:
-            # Let backend auto-generate invoice_number if empty
-            create_invoice(
-                company_id=company_id,
-                username=username,
-                invoice_number="",  # backend should handle empty as "auto"
-                vendor_invoice_number=vendor_invoice_number,
-                vendor=vendor,
-                summary=summary,
-                vatable_amount=vatable_amount,
-                vat_rate=vat_rate,
-                wht_rate=wht_rate,
-                non_vatable_amount=non_vatable_amount,
-                terms=terms,
-                payable_account=payable_account,
-                expense_asset_account=expense_asset_account,
-                currency=currency,
-                file_name=file_name,
-                file_data=file_bytes,
-            )
-        except Exception as ex:
-            err = str(ex)
-
-        if err:
-            st.error(err)
-        else:
-            st.success("Invoice created successfully.")
-
-    st.markdown("---")
-    st.subheader("Recent Invoices")
-    idf = pd.DataFrame(list_invoices(company_id=company_id))
-    if not idf.empty:
-        if "total_amount" in idf.columns:
-            idf["total_amount_fmt"] = idf["total_amount"].apply(
-                lambda v: f"{v:,.2f}" if v is not None else ""
-            )
-        st.dataframe(idf)
-    else:
-        st.info("No invoices yet.")
-
-
-# -------------------
-# CRM (Staff, Vendors & Accounts)
-# -------------------
-
-def app_crm():
-    require_permission("can_create_voucher")
-    user = current_user()
-    username = user["username"]
-    company_id = user["company_id"]
-
-    # ---- Staff ----
-    st.subheader("Staff")
-
-    with st.form("staff_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            first_name = st.text_input("First Name")
-            email = st.text_input("Email")
-            phone = st.text_input("Phone")
-        with col2:
-            last_name = st.text_input("Last Name")
-            status = st.selectbox("Status", ["Active", "Inactive"], index=0)
-            position = st.text_input("Position / Role")
-
-        submitted_staff = st.form_submit_button("Save Staff")
-        if submitted_staff:
-            err = upsert_staff(
-                company_id=company_id,
-                staff_id=None,
-                first_name=first_name,
-                last_name=last_name,
-                email=email,
-                phone=phone,
-                status=status,
-                position=position,
-            )
-            if err:
-                st.error(err)
-            else:
-                st.success("Staff saved.")
-
-    staff_rows = list_staff(company_id=company_id)
-    if staff_rows:
-        st.dataframe(pd.DataFrame(staff_rows))
-    else:
-        st.info("No staff yet.")
-
-    st.markdown("---")
-    # ---- Vendors ----
-    st.subheader("Vendors")
-
-    with st.form("vendor_form"):
-        name = st.text_input("Vendor Name")
-        contact = st.text_input("Contact Person")
-        bank_name = st.text_input("Bank Name")
-        bank_account = st.text_input("Bank Account")
-        notes = st.text_area("Notes")
-        submitted_vendor = st.form_submit_button("Save Vendor")
-        if submitted_vendor:
-            if not name:
-                st.error("Vendor name is required.")
-            else:
-                upsert_vendor(
-                    company_id=company_id,
-                    name=name,
-                    contact_person=contact,
-                    bank_name=bank_name,
-                    bank_account=bank_account,
-                    notes=notes,
-                    username=username,
-                )
-                st.success("Vendor saved.")
-
-    vdf = pd.DataFrame(list_vendors(company_id=company_id))
-    if not vdf.empty:
-        st.dataframe(vdf)
-    else:
-        st.info("No vendors yet.")
-
-    st.markdown("---")
-    # ---- Accounts ----
-    st.subheader("Accounts (Chart of Accounts)")
-
-    with st.form("account_form"):
-        code = st.text_input("Account Code")
-        name = st.text_input("Account Name")
-        acc_type = st.selectbox(
-            "Type",
-            ["Asset", "Liability", "Equity", "Expense", "Income"],
-            index=0,
-        )
-        submitted_account = st.form_submit_button("Save Account")
-        if submitted_account:
-            if not code or not name:
-                st.error("Code and name are required.")
-            else:
-                upsert_account(
-                    company_id=company_id,
-                    code=code,
-                    name=name,
-                    account_type=acc_type,
-                    username=username,
-                )
-                st.success("Account saved.")
-
-    all_accounts = list_accounts(company_id=company_id)
-
-    payable_accounts = [
-        a for a in all_accounts if a.get("type") in ("Liability", "Equity")
-    ]
-    expense_asset_accounts = [
-        a for a in all_accounts if a.get("type") in ("Expense", "Asset")
-    ]
-
-    st.markdown("**Payable Accounts (Liability / Equity)**")
-    if payable_accounts:
-        st.dataframe(pd.DataFrame(payable_accounts))
-    else:
-        st.info("No payable accounts yet.")
-
-    st.markdown("**Expense & Asset Accounts**")
-    if expense_asset_accounts:
-        st.dataframe(pd.DataFrame(expense_asset_accounts))
-    else:
-        st.info("No expense or asset accounts yet.")
-
-
-# -------------------
-# Reports
-# -------------------
-
-def app_reports():
-    # Any logged-in user can see reports
-    require_login()
-    user = current_user()
-    company_id = user["company_id"]
-
-    st.subheader("Reports")
-
-    tab1, tab2, tab3 = st.tabs(["Voucher Register", "Invoice Register", "CRM / Master Data"])
-
-    # Voucher report
-    with tab1:
-        st.markdown("### Voucher Register")
-        vdf = pd.DataFrame(list_vouchers(company_id=company_id))
-        if vdf.empty:
-            st.info("No vouchers yet.")
-        else:
-            # Simple filters: by vendor and status if those columns exist
-            if "vendor" in vdf.columns:
-                vendors = ["(All)"] + sorted(
-                    [v for v in vdf["vendor"].dropna().unique().tolist()]
-                )
-                vendor_filter = st.selectbox("Filter by Vendor", vendors)
-                if vendor_filter != "(All)":
-                    vdf = vdf[vdf["vendor"] == vendor_filter]
-
-            if "status" in vdf.columns:
-                statuses = ["(All)"] + sorted(
-                    [s for s in vdf["status"].dropna().unique().tolist()]
-                )
-                status_filter = st.selectbox("Filter by Status", statuses)
-                if status_filter != "(All)":
-                    vdf = vdf[vdf["status"] == status_filter]
-
-            st.dataframe(vdf)
-
-    # Invoice report
-    with tab2:
-        st.markdown("### Invoice Register")
-        idf = pd.DataFrame(list_invoices(company_id=company_id))
-        if idf.empty:
-            st.info("No invoices yet.")
-        else:
-            if "vendor" in idf.columns:
-                vendors = ["(All)"] + sorted(
-                    [v for v in idf["vendor"].dropna().unique().tolist()]
-                )
-                vendor_filter = st.selectbox("Filter by Vendor", vendors, key="inv_vendor_filter")
-                if vendor_filter != "(All)":
-                    idf = idf[idf["vendor"] == vendor_filter]
-
-            if "currency" in idf.columns:
-                currencies = ["(All)"] + sorted(
-                    [c for c in idf["currency"].dropna().unique().tolist()]
-                )
-                currency_filter = st.selectbox("Filter by Currency", currencies, key="inv_currency_filter")
-                if currency_filter != "(All)":
-                    idf = idf[idf["currency"] == currency_filter]
-
-            st.dataframe(idf)
-
-    # CRM / master data overview
-    with tab3:
-        st.markdown("### CRM / Master Data")
-
-        st.markdown("#### Vendors")
-        vdf = pd.DataFrame(list_vendors(company_id=company_id))
-        if vdf.empty:
-            st.info("No vendors yet.")
-        else:
-            st.dataframe(vdf)
-
-        st.markdown("#### Staff")
-        sdf = pd.DataFrame(list_staff(company_id=company_id))
-        if sdf.empty:
-            st.info("No staff yet.")
-        else:
-            st.dataframe(sdf)
-
-        st.markdown("#### Accounts (Chart of Accounts)")
-        adf = pd.DataFrame(list_accounts(company_id=company_id))
-        if adf.empty:
-            st.info("No accounts yet.")
-        else:
-            st.dataframe(adf)
-
-
-# -------------------
-# User Management
-# -------------------
-
-def app_user_management():
-    require_permission("can_manage_users")
-    admin = current_user()
-    admin_name = admin["username"]
-    company_id = admin["company_id"]
-
-    st.subheader(
-        f"User Management – {admin['company_name']} ({admin['company_code']})"
-    )
-
-    st.markdown("### Create New User")
-
-    with st.form("create_user_form"):
-        new_username = st.text_input("Username")
-        pw1 = st.text_input("Password", type="password")
-        pw2 = st.text_input("Confirm Password", type="password")
-        new_role = st.selectbox("Role", ["user", "admin"], index=0)
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            can_create_voucher = st.checkbox(
-                "Can create vouchers",
-                value=True,
-            )
-        with col2:
-            can_approve_voucher = st.checkbox(
-                "Can approve vouchers",
-                value=(new_role == "admin"),
-            )
-        with col3:
-            can_manage_users = st.checkbox(
-                "Can manage users",
-                value=(new_role == "admin"),
-            )
-
-        submitted = st.form_submit_button("Create User")
-        if submitted:
-            if not new_username or not pw1 or not pw2:
-                st.error("Username and both password fields are required.")
-            elif pw1 != pw2:
-                st.error("Passwords do not match.")
-            else:
-                err = create_user_for_company(
-                    company_id=company_id,
-                    username=new_username,
-                    password=pw1,
-                    role=new_role,
-                    can_create_voucher=can_create_voucher,
-                    can_approve_voucher=can_approve_voucher,
-                    can_manage_users=can_manage_users,
-                    actor_username=admin_name,
-                )
-                if err:
-                    st.error(err)
-                else:
-                    st.success(f"User '{new_username}' created.")
-
-    st.markdown("---")
-    st.markdown("### Existing Users")
-
-    users = list_users(company_id=company_id)
-    if not users:
-        st.info("No users found.")
+    vouchers = list_vouchers(company_id=company_id)
+    df_vch = pd.DataFrame(vouchers)
+    if df_vch.empty:
+        st.info("No vouchers found.")
         return
 
-    for u in users:
-        with st.expander(
-            f"{u['username']} (role: {u['role']})",
-            expanded=False,
-        ):
-            with st.form(f"edit_user_{u['id']}"):
-                role = st.selectbox(
-                    "Role",
-                    ["user", "admin"],
-                    index=0 if u["role"] == "user" else 1,
-                    key=f"edit_role_{u['id']}",
-                )
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    c_create = st.checkbox(
-                        "Can create vouchers",
-                        value=bool(u["can_create_voucher"]),
-                        key=f"edit_create_{u['id']}",
-                    )
-                with col2:
-                    c_approve = st.checkbox(
-                        "Can approve vouchers",
-                        value=bool(u["can_approve_voucher"]),
-                        key=f"edit_approve_{u['id']}",
-                    )
-                with col3:
-                    c_manage = st.checkbox(
-                        "Can manage users",
-                        value=bool(u["can_manage_users"]),
-                        key=f"edit_manage_{u['id']}",
-                    )
+    st.dataframe(df_vch)
 
-                save_btn = st.form_submit_button("Save Changes")
-                if save_btn:
-                    err = update_user_permissions(
-                        actor_username=admin_name,
-                        user_id=u["id"],
-                        company_id=company_id,
-                        role=role,
-                        can_create_voucher=c_create,
-                        can_approve_voucher=c_approve,
-                        can_manage_users=c_manage,
-                    )
-                    if err:
-                        st.error(err)
-                    else:
-                        st.success("Permissions updated.")
+    # Status change block
+    st.markdown("### Update Voucher Status")
+    vch_ids = df_vch["voucher_id"].tolist()
+    if vch_ids:
+        selected_id = st.selectbox("Select Voucher ID", vch_ids)
+        new_status = st.selectbox("New Status", ["PENDING", "APPROVED", "REJECTED", "PAID"])
+        if st.button("Change Status"):
+            change_voucher_status(company_id, selected_id, new_status)
+            st.success("Status updated.")
+            st.experimental_rerun()
+
+    # Delete voucher
+    st.markdown("### Delete Voucher")
+    vch_to_delete = st.selectbox("Select Voucher to delete", vch_ids)
+    if st.button("Delete Voucher"):
+        delete_voucher(company_id, vch_to_delete)
+        st.success("Voucher deleted.")
+        st.experimental_rerun()
+
+    # PDF download for voucher
+    st.markdown("### Download Voucher PDF")
+    pdf_voucher_id = st.selectbox("Select Voucher ID for PDF", vch_ids)
+    if st.button("Generate PDF"):
+        pdf_bytes = build_voucher_pdf_bytes(company_id, pdf_voucher_id)
+        st.download_button(
+            label="Download Voucher PDF",
+            data=pdf_bytes,
+            file_name=f"voucher_{pdf_voucher_id}.pdf",
+            mime="application/pdf",
+        )
 
 
-# -------------------
-# Account page
-# -------------------
+# ----------
+# Invoices
+# ----------
 
-def app_account():
-    require_login()
+def app_invoices():
+    require_permission("can_manage_invoices")
     user = current_user()
+    company_id = user["company_id"]
 
-    st.subheader("My Account")
+    st.title("Invoices")
 
-    st.markdown(f"**Username:** {user['username']}")
-    st.markdown(f"**Role:** {user['role']}")
-    st.markdown(f"**Company:** {user['company_name']} ({user['company_code']})")
+    st.markdown("### Create / Update Invoice")
 
-    st.markdown("---")
+    all_invoices = list_invoices(company_id=company_id)
+    df_inv = pd.DataFrame(all_invoices)
 
+    edit_mode = st.checkbox("Edit existing invoice?")
+    invoice_number = None
+    selected_invoice = None
 
-# -------------------
-# DB Browser (admin)
-# -------------------
+    if edit_mode and not df_inv.empty:
+        inv_choice = st.selectbox("Select Invoice to edit", df_inv["invoice_number"])
+        selected_invoice = df_inv[df_inv["invoice_number"] == inv_choice].iloc[0].to_dict()
+        invoice_number = selected_invoice["invoice_number"]
+    else:
+        invoice_number = st.text_input("Invoice Number (leave blank if editing)")
 
-def app_db_browser():
-    require_admin()
-    st.subheader("DB Browser (admin only)")
-
-    query = st.text_area(
-        "SQL Query", "SELECT * FROM vouchers ORDER BY id DESC LIMIT 50;"
+    vendor_options = get_vendor_name_list(company_id)
+    vendor = st.selectbox(
+        "Vendor",
+        vendor_options,
+        index=vendor_options.index(selected_invoice["vendor"])
+        if selected_invoice and selected_invoice.get("vendor") in vendor_options
+        else 0,
     )
-    if st.button("Run Query"):
-        try:
-            with connect() as conn:
-                df = pd.read_sql_query(query, conn)
-            st.dataframe(df)
-        except psycopg2.Error as e:
-            st.error(f"Database error: {e}")
-        except Exception as e:
-            st.error(f"Error: {e}")
+
+    currency_options = ["NGN", "USD", "GBP", "EUR"]
+    currency_index = 0
+    if selected_invoice and selected_invoice.get("currency") in currency_options:
+        currency_index = currency_options.index(selected_invoice["currency"])
+    currency = st.selectbox("Currency", currency_options, index=currency_index)
+
+    inv_date = st.date_input(
+        "Invoice Date",
+        value=selected_invoice["invoice_date"] if selected_invoice else None,
+    )
+    due_date = st.date_input(
+        "Due Date",
+        value=selected_invoice["due_date"] if selected_invoice else None,
+    )
+
+    vatable_amount = st.number_input(
+        "Vatable Amount",
+        min_value=0.0,
+        format="%.2f",
+        value=float(selected_invoice["vatable_amount"])
+        if selected_invoice and selected_invoice.get("vatable_amount")
+        else 0.0,
+    )
+    non_vatable_amount = st.number_input(
+        "Non-vatable Amount",
+        min_value=0.0,
+        format="%.2f",
+        value=float(selected_invoice["non_vatable_amount"])
+        if selected_invoice and selected_invoice.get("non_vatable_amount")
+        else 0.0,
+    )
+    vat_amount = st.number_input(
+        "VAT Amount",
+        min_value=0.0,
+        format="%.2f",
+        value=float(selected_invoice["vat_amount"])
+        if selected_invoice and selected_invoice.get("vat_amount")
+        else 0.0,
+    )
+    wht_amount = st.number_input(
+        "WHT Amount",
+        min_value=0.0,
+        format="%.2f",
+        value=float(selected_invoice["wht_amount"])
+        if selected_invoice and selected_invoice.get("wht_amount")
+        else 0.0,
+    )
+    remarks = st.text_area(
+        "Remarks",
+        value=selected_invoice["remarks"] if selected_invoice else "",
+    )
+
+    if st.button("Save Invoice"):
+        if not vendor:
+            st.error("Vendor is required.")
+        else:
+            if edit_mode and selected_invoice:
+                update_invoice(
+                    company_id=company_id,
+                    invoice_number=invoice_number,
+                    vendor=vendor,
+                    currency=currency,
+                    invoice_date=inv_date,
+                    due_date=due_date,
+                    vatable_amount=vatable_amount,
+                    non_vatable_amount=non_vatable_amount,
+                    vat_amount=vat_amount,
+                    wht_amount=wht_amount,
+                    remarks=remarks,
+                )
+                st.success("Invoice updated.")
+            else:
+                if not invoice_number:
+                    st.error("Invoice number is required for new invoices.")
+                    return
+                create_invoice(
+                    company_id=company_id,
+                    invoice_number=invoice_number,
+                    vendor=vendor,
+                    currency=currency,
+                    invoice_date=inv_date,
+                    due_date=due_date,
+                    vatable_amount=vatable_amount,
+                    non_vatable_amount=non_vatable_amount,
+                    vat_amount=vat_amount,
+                    wht_amount=wht_amount,
+                    remarks=remarks,
+                )
+                st.success("Invoice created.")
+            st.experimental_rerun()
+
+    st.markdown("### Existing Invoices")
+    if not df_inv.empty:
+        st.dataframe(df_inv)
+    else:
+        st.info("No invoices found.")
+
+    st.markdown("### Delete Invoice")
+    if not df_inv.empty:
+        inv_to_delete = st.selectbox("Select Invoice to delete", df_inv["invoice_number"])
+        if st.button("Delete Invoice"):
+            delete_invoice(company_id, inv_to_delete)
+            st.success("Invoice deleted.")
+            st.experimental_rerun()
+    else:
+        st.info("No invoices available to delete.")
 
 
-# -------------------
-# Main entry
-# -------------------
+# ----------
+# User & Role Management
+# ----------
+
+def app_user_admin():
+    require_admin()
+    user = current_user()
+    company_id = user["company_id"]
+
+    st.title("User & Role Management")
+
+    st.markdown("### Existing Users")
+    users = list_users(company_id=company_id)
+    df_u = pd.DataFrame(users)
+    if not df_u.empty:
+        st.dataframe(df_u)
+    else:
+        st.info("No users found.")
+
+    st.markdown("### Update Permissions")
+    if not df_u.empty:
+        selected_username = st.selectbox(
+            "Select user",
+            df_u["username"],
+        )
+        if selected_username:
+            perms = {
+                "can_manage_crm": st.checkbox("Can manage CRM?"),
+                "can_create_voucher": st.checkbox("Can create vouchers?"),
+                "can_manage_invoices": st.checkbox("Can manage invoices?"),
+                "is_admin": st.checkbox("Is admin?"),
+            }
+            if st.button("Update Permissions"):
+                update_user_permissions(company_id, selected_username, perms)
+                st.success("Permissions updated.")
+                st.experimental_rerun()
+
+    st.markdown("### Create New User")
+    with st.form("create_user_form"):
+        new_username = st.text_input("New Username")
+        new_password = st.text_input("Password", type="password")
+        new_fullname = st.text_input("Full Name")
+        perms = {
+            "can_manage_crm": st.checkbox("Can manage CRM?", key="perm_crm"),
+            "can_create_voucher": st.checkbox(
+                "Can create vouchers?", key="perm_voucher"
+            ),
+            "can_manage_invoices": st.checkbox(
+                "Can manage invoices?", key="perm_inv"
+            ),
+            "is_admin": st.checkbox("Is admin?", key="perm_admin"),
+        }
+        submit_new = st.form_submit_button("Create User")
+
+    if submit_new:
+        if not new_username or not new_password:
+            st.error("Username and password are required.")
+        else:
+            create_user_for_company(
+                company_id=company_id,
+                username=new_username.strip(),
+                password=new_password,
+                full_name=new_fullname.strip(),
+                permissions=perms,
+            )
+            st.success("User created successfully.")
+            st.experimental_rerun()
+
+
+# ----------
+# Main App Entry Point
+# ----------
 
 def main():
-    st.set_page_config(page_title="VoucherPro – Multi-Company", layout="wide")
+    st.set_page_config(page_title="Finance App (Multi-tenant)", layout="wide")
 
-    if "user" not in st.session_state:
-        st.session_state["user"] = None
-
+    # Initialize schema & auth
     init_schema()
     init_auth()
 
+    # Login gate
     require_login()
     user = current_user()
+    if not user:
+        # If somehow not authenticated, do nothing.
+        st.stop()
 
-    st.sidebar.markdown(
-        f"**User:** {user['username']}  "
-        f"<br/>**Company:** {user['company_name']} ({user['company_code']})",
-        unsafe_allow_html=True,
-    )
-    if st.sidebar.button("Logout"):
-        st.session_state["user"] = None
-        st.rerun()
+    company_id = user["company_id"]
+    username = user["username"]
 
-    menu = ["Vouchers", "Invoices", "CRM", "Reports", "Account"]
+    st.sidebar.markdown(f"**Logged in as:** {username} (Company: {company_id})")
+    logout_button()
 
-    if user.get("can_manage_users", False):
-        menu.append("User Management")
-
-    if user["role"] == "admin":
-        menu.append("DB Browser")
-
+    menu = ["Vouchers", "Invoices", "CRM & Master Data", "User Admin"]
     choice = st.sidebar.radio("Go to", menu)
 
     if choice == "Vouchers":
         app_vouchers()
     elif choice == "Invoices":
         app_invoices()
-    elif choice == "CRM":
+    elif choice == "CRM & Master Data":
         app_crm()
-    elif choice == "Reports":
-        app_reports()
-    elif choice == "User Management":
-        app_user_management()
-    elif choice == "DB Browser":
-        app_db_browser()
-    elif choice == "Account":
-        app_account()
+    elif choice == "User Admin":
+        app_user_admin()
 
 
 if __name__ == "__main__":
