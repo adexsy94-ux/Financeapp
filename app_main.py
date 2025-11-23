@@ -67,7 +67,33 @@ def app_vouchers():
     )
     invoice_ref = "" if invoice_choice == "(None)" else invoice_choice
 
-    currency = st.selectbox("Currency", ["NGN", "USD", "GBP", "EUR"], index=0)
+    # Determine default currency based on selected invoice (if any)
+    base_currencies = ["NGN", "USD", "GBP", "EUR"]
+    invoice_currency = None
+    if invoice_choice != "(None)":
+        for inv in all_invoices:
+            if inv.get("invoice_number") == invoice_choice:
+                invoice_currency = (inv.get("currency") or "NGN").upper()
+                break
+
+    # Build currency options, ensuring invoice currency is present
+    currencies = base_currencies.copy()
+    if invoice_currency and invoice_currency not in currencies:
+        currencies.append(invoice_currency)
+
+    # Pick default index: invoice currency if present, else NGN
+    default_currency = invoice_currency or "NGN"
+    try:
+        default_index = currencies.index(default_currency)
+    except ValueError:
+        default_index = 0
+
+    currency = st.selectbox(
+        "Currency",
+        currencies,
+        index=default_index,
+        help="Auto-fills from the selected invoice if available, but you can override.",
+    )
 
     uploaded = st.file_uploader(
         "Attach supporting document (optional)", type=["pdf", "jpg", "png"]
@@ -210,14 +236,15 @@ def app_vouchers():
                 pdf_bytes = build_voucher_pdf_bytes(
                     company_id=company_id, voucher_id=int(pdf_id)
                 )
+            except Exception as e:
+                st.error(f"Error generating PDF: {e}")
+            else:
                 st.download_button(
                     label="Download PDF",
                     data=pdf_bytes,
                     file_name=f"voucher_{pdf_id}.pdf",
                     mime="application/pdf",
                 )
-            except Exception as e:
-                st.error(f"Error generating PDF: {e}")
     else:
         st.info("No vouchers yet.")
 
