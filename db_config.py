@@ -253,9 +253,6 @@ def init_schema() -> None:
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS company_id INTEGER;")
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS status TEXT;")
         cur.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS position TEXT;")
-        cur.execute(
-            "ALTER TABLE staff ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;"
-        )
 
         # --- Lightweight migrations for existing vouchers table ---
         cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS parent_id INTEGER;")
@@ -285,14 +282,6 @@ def init_schema() -> None:
         cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS approved_by TEXT;")
         cur.execute(
             "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;"
-        )
-
-        # --- Lightweight migrations for existing voucher_lines table ---
-        cur.execute(
-            "ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS line_no INTEGER;"
-        )
-        cur.execute(
-            "ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS total NUMERIC(18,2);"
         )
 
         # --- Lightweight migrations for voucher_documents table ---
