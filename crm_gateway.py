@@ -34,13 +34,14 @@ def list_vendors(company_id: int) -> List[Dict]:
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """
-            SELECT id,
-                   name,
-                   contact_person,
-                   bank_name,
-                   bank_account,
-                   notes,
-                   created_at
+            SELECT
+                id,
+                name,
+                contact_person,
+                bank_name,
+                bank_account,
+                notes,
+                created_at
             FROM vendors
             WHERE company_id = %s
             ORDER BY lower(name)
@@ -378,11 +379,12 @@ def list_accounts(company_id: int) -> List[Dict]:
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """
-            SELECT id,
-                   code,
-                   name,
-                   type,
-                   created_at
+            SELECT
+                id,
+                code,
+                name,
+                type,
+                created_at
             FROM accounts
             WHERE company_id = %s
             ORDER BY code
@@ -415,19 +417,9 @@ def upsert_account(
     """
     Insert or update a chart of account row.
 
-    This is intentionally flexible with kwargs so app_main calls using either:
-
-        upsert_account(..., account_type="Expense", username="...")
-
-    or:
-
-        upsert_account(..., acc_type="Expense", account_id=123)
-
-    will both work.
-
-    Recognised kwargs:
+    Accepts extra kwargs for compatibility:
       - account_type / acc_type
-      - username (ignored here but kept for compatibility)
+      - username (ignored)
       - account_id
     """
     code = (code or "").strip()
