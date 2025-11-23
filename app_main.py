@@ -1,11 +1,9 @@
-# app_main.py – Finance app main entrypoint
+# app_main.py
+# Main Streamlit app wiring all modules together, with multi-tenant support
 
 import streamlit as st
 import pandas as pd
-
-# --- Safety alias: allow old code to call st.markmarkdown without crashing ---
-if not hasattr(st, "markmarkdown"):
-    st.markmarkdown = st.markdown
+import psycopg2
 
 from db_config import init_schema, connect
 from auth_module import (
@@ -15,15 +13,19 @@ from auth_module import (
     require_permission,
     current_user,
     list_users,
+    update_user_permissions,
     create_user_for_company,
 )
 from crm_gateway import (
-    list_staff,
-    upsert_staff,
     list_vendors,
     upsert_vendor,
+    delete_vendor,
     list_accounts,
     upsert_account,
+    list_staff,
+    upsert_staff,
+    delete_staff,
+    delete_account,
     get_vendor_name_list,
     get_requester_options,
     get_payable_account_options,
@@ -42,18 +44,6 @@ from invoices_module import (
     delete_invoice,
 )
 from pdf_utils import build_voucher_pdf_bytes
-
-# ... rest of your app_main.py (app_vouchers, app_invoices, app_crm, main(), etc.)
-
-
-# -------------------
-# Helpers
-# -------------------
-
-def logout_button():
-    if st.sidebar.button("Logout"):
-        st.session_state["user"] = None
-        st.experimental_rerun()
 
 
 # -------------------
@@ -76,9 +66,7 @@ def app_vouchers():
     vendor = st.selectbox("Vendor (from CRM)", vendor_options)
     requester = st.selectbox("Requester (Staff in CRM)", requester_options)
 
-    # -----------------------------
-    # Link voucher to invoice
-    # -----------------------------
+    # Link vouchers to invoices for this vendor
     all_invoices = list_invoices(company_id=company_id)
     invoice_numbers_for_vendor = [
         row["invoice_number"]
@@ -197,11 +185,28 @@ def app_vouchers():
             )
 
         # -------- WHT block --------
-       
-    # -----------------------------
-    # Voucher currency and file upload
-    # -----------------------------
-    currencies = ["NGN", "USD", "GBP", "EUR"]
+        with c3:
+            st.markdown("**WHT Allocation**")
+            st.write(f"Invoice WHT: **{inv_wht_total:,.2f} {cur_code}**")
+            st.markdown(
+                "WHT Deducted via Vouchers: "
+                f"<span style='color: green; font-weight:bold;'>{wht_paid:,.2f} {cur_code}</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "WHT Balance: "
+                f"<span style='color: red; font-weight:bold;'>{wht_balance:,.2f} {cur_code}</span>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+
+    # Determine default currency based on selected invoice (if any)
+    base_currencies = ["NGN", "USD", "GBP", "EUR"]
+    currencies = base_currencies.copy()
+    if invoice_currency and invoice_currency not in currencies:
+        currencies.append(invoice_currency)
+
     default_currency = invoice_currency or "NGN"
     try:
         default_index = currencies.index(default_currency)
@@ -256,10 +261,10 @@ def app_vouchers():
         lines.append(
             {
                 "description": desc,
-                "amount": float(amt or 0.0),
-                "account_code": acct,
-                "vat_percent": float(vat or 0.0),
-                "wht_percent": float(wht or 0.0),
+                "amount": amt,
+                "account_name": acct,
+                "vat_percent": vat,
+                "wht_percent": wht,
             }
         )
 
@@ -273,11 +278,6 @@ def app_vouchers():
         round((l.get("amount") or 0.0) * (l.get("wht_percent") or 0.0) / 100.0, 2)
         for l in lines
     )
-
-    st.markdown("### Voucher Line Totals (for this document)")
-    st.write(f"Total Base Amount: **{total_line_amount:,.2f} {currency}**")
-    st.write(f"Total VAT Amount (@line rates): **{total_line_vat:,.2f} {currency}**")
-    st.write(f"Total WHT Amount (@line rates): **{total_line_wht:,.2f} {currency}**")
 
     # ---- Validation against invoice balances ----
     validation_errors = []
@@ -305,13 +305,17 @@ def app_vouchers():
                 f"is greater than the WHT Balance ({wht_balance:,.2f} {cur_code})."
             )
 
+    # Show validation errors immediately so user knows why save won't work
     if validation_errors:
         for msg in validation_errors:
             st.error(msg)
 
     # ---- Save button (only actually saves if validation passes) ----
-    if st.button("Save Voucher"):
+    save_clicked = st.button("Save Voucher")
+
+    if save_clicked:
         if validation_errors:
+            # Do not call create_voucher – just explain
             st.error(
                 "Voucher not saved because one or more line totals are higher than the "
                 "remaining invoice balances shown above. Please adjust the Amount, VAT, "
@@ -333,7 +337,6 @@ def app_vouchers():
                 st.error(err)
             else:
                 st.success("Voucher created successfully.")
-                st.experimental_rerun()
 
     st.markdown("---")
     st.subheader("Recent Vouchers")
@@ -408,7 +411,9 @@ def app_vouchers():
         )
         if pdf_id > 0 and st.button("Download Voucher PDF"):
             try:
-                pdf_bytes = build_voucher_pdf_bytes(company_id=company_id, voucher_id=int(pdf_id))
+                pdf_bytes = build_voucher_pdf_bytes(
+                    company_id=company_id, voucher_id=int(pdf_id)
+                )
             except Exception as e:
                 st.error(f"Error generating PDF: {e}")
             else:
@@ -427,11 +432,12 @@ def app_vouchers():
 # -------------------
 
 def app_invoices():
-    require_permission("can_create_voucher")  # or dedicated invoice permission
+    require_permission("can_create_voucher")
     user = current_user()
     username = user["username"]
     company_id = user["company_id"]
 
+    # CRM-driven dropdown options
     vendor_options = get_vendor_name_list(company_id)
     payable_options = get_payable_account_options(company_id)
     expense_asset_options = get_expense_asset_account_options(company_id)
@@ -440,9 +446,7 @@ def app_invoices():
 
     st.info("Invoice number will be auto-generated using date and time when you save.")
 
-    vendor = st.selectbox("Vendor", vendor_options)
-    invoice_date = st.date_input("Invoice Date")
-    due_date = st.date_input("Due Date")
+    vendor = st.selectbox("Vendor (from CRM)", vendor_options)
     vendor_invoice_number = st.text_input("Vendor Invoice Number")
     summary = st.text_area("Summary")
 
@@ -478,13 +482,13 @@ def app_invoices():
     if st.button("Save Invoice"):
         err = None
         try:
-            err = create_invoice(
+            # Let backend auto-generate invoice_number if empty
+            create_invoice(
                 company_id=company_id,
                 username=username,
-                vendor=vendor,
-                invoice_date=invoice_date,
-                due_date=due_date,
+                invoice_number="",  # backend should handle empty as "auto"
                 vendor_invoice_number=vendor_invoice_number,
+                vendor=vendor,
                 summary=summary,
                 vatable_amount=vatable_amount,
                 vat_rate=vat_rate,
@@ -504,7 +508,6 @@ def app_invoices():
             st.error(err)
         else:
             st.success("Invoice created successfully.")
-            st.experimental_rerun()
 
     st.markdown("---")
     st.subheader("Recent Invoices")
@@ -520,7 +523,7 @@ def app_invoices():
 
 
 # -------------------
-# CRM
+# CRM (Staff, Vendors & Accounts)
 # -------------------
 
 def app_crm():
@@ -536,10 +539,10 @@ def app_crm():
         col1, col2 = st.columns(2)
         with col1:
             first_name = st.text_input("First Name")
-            last_name = st.text_input("Last Name")
             email = st.text_input("Email")
             phone = st.text_input("Phone")
         with col2:
+            last_name = st.text_input("Last Name")
             status = st.selectbox("Status", ["Active", "Inactive"], index=0)
             position = st.text_input("Position / Role")
 
@@ -581,7 +584,7 @@ def app_crm():
             if not name:
                 st.error("Vendor name is required.")
             else:
-                err = upsert_vendor(
+                upsert_vendor(
                     company_id=company_id,
                     name=name,
                     contact_person=contact,
@@ -590,10 +593,7 @@ def app_crm():
                     notes=notes,
                     username=username,
                 )
-                if err:
-                    st.error(err)
-                else:
-                    st.success("Vendor saved.")
+                st.success("Vendor saved.")
 
     vdf = pd.DataFrame(list_vendors(company_id=company_id))
     if not vdf.empty:
@@ -602,15 +602,15 @@ def app_crm():
         st.info("No vendors yet.")
 
     st.markdown("---")
-    # ---- Chart of Accounts ----
-    st.subheader("Chart of Accounts")
+    # ---- Accounts ----
+    st.subheader("Accounts (Chart of Accounts)")
 
     with st.form("account_form"):
         code = st.text_input("Account Code")
         name = st.text_input("Account Name")
         acc_type = st.selectbox(
-            "Account Type",
-            ["asset", "liability", "equity", "income", "expense"],
+            "Type",
+            ["Asset", "Liability", "Equity", "Expense", "Income"],
             index=0,
         )
         submitted_account = st.form_submit_button("Save Account")
@@ -618,24 +618,126 @@ def app_crm():
             if not code or not name:
                 st.error("Code and name are required.")
             else:
-                err = upsert_account(
+                upsert_account(
                     company_id=company_id,
                     code=code,
                     name=name,
                     account_type=acc_type,
                     username=username,
                 )
-                if err:
-                    st.error(err)
-                else:
-                    st.success("Account saved.")
+                st.success("Account saved.")
 
     all_accounts = list_accounts(company_id=company_id)
-    if all_accounts:
-        adf = pd.DataFrame(all_accounts)
-        st.dataframe(adf)
+
+    payable_accounts = [
+        a for a in all_accounts if a.get("type") in ("Liability", "Equity")
+    ]
+    expense_asset_accounts = [
+        a for a in all_accounts if a.get("type") in ("Expense", "Asset")
+    ]
+
+    st.markdown("**Payable Accounts (Liability / Equity)**")
+    if payable_accounts:
+        st.dataframe(pd.DataFrame(payable_accounts))
     else:
-        st.info("No accounts yet.")
+        st.info("No payable accounts yet.")
+
+    st.markdown("**Expense & Asset Accounts**")
+    if expense_asset_accounts:
+        st.dataframe(pd.DataFrame(expense_asset_accounts))
+    else:
+        st.info("No expense or asset accounts yet.")
+
+
+# -------------------
+# Reports
+# -------------------
+
+def app_reports():
+    # Any logged-in user can see reports
+    require_login()
+    user = current_user()
+    company_id = user["company_id"]
+
+    st.subheader("Reports")
+
+    tab1, tab2, tab3 = st.tabs(["Voucher Register", "Invoice Register", "CRM / Master Data"])
+
+    # Voucher report
+    with tab1:
+        st.markdown("### Voucher Register")
+        vdf = pd.DataFrame(list_vouchers(company_id=company_id))
+        if vdf.empty:
+            st.info("No vouchers yet.")
+        else:
+            # Simple filters: by vendor and status if those columns exist
+            if "vendor" in vdf.columns:
+                vendors = ["(All)"] + sorted(
+                    [v for v in vdf["vendor"].dropna().unique().tolist()]
+                )
+                vendor_filter = st.selectbox("Filter by Vendor", vendors)
+                if vendor_filter != "(All)":
+                    vdf = vdf[vdf["vendor"] == vendor_filter]
+
+            if "status" in vdf.columns:
+                statuses = ["(All)"] + sorted(
+                    [s for s in vdf["status"].dropna().unique().tolist()]
+                )
+                status_filter = st.selectbox("Filter by Status", statuses)
+                if status_filter != "(All)":
+                    vdf = vdf[vdf["status"] == status_filter]
+
+            st.dataframe(vdf)
+
+    # Invoice report
+    with tab2:
+        st.markdown("### Invoice Register")
+        idf = pd.DataFrame(list_invoices(company_id=company_id))
+        if idf.empty:
+            st.info("No invoices yet.")
+        else:
+            if "vendor" in idf.columns:
+                vendors = ["(All)"] + sorted(
+                    [v for v in idf["vendor"].dropna().unique().tolist()]
+                )
+                vendor_filter = st.selectbox("Filter by Vendor", vendors, key="inv_vendor_filter")
+                if vendor_filter != "(All)":
+                    idf = idf[idf["vendor"] == vendor_filter]
+
+            if "currency" in idf.columns:
+                currencies = ["(All)"] + sorted(
+                    [c for c in idf["currency"].dropna().unique().tolist()]
+                )
+                currency_filter = st.selectbox("Filter by Currency", currencies, key="inv_currency_filter")
+                if currency_filter != "(All)":
+                    idf = idf[idf["currency"] == currency_filter]
+
+            st.dataframe(idf)
+
+    # CRM / master data overview
+    with tab3:
+        st.markdown("### CRM / Master Data")
+
+        st.markdown("#### Vendors")
+        vdf = pd.DataFrame(list_vendors(company_id=company_id))
+        if vdf.empty:
+            st.info("No vendors yet.")
+        else:
+            st.dataframe(vdf)
+
+        st.markdown("#### Staff")
+        sdf = pd.DataFrame(list_staff(company_id=company_id))
+        if sdf.empty:
+            st.info("No staff yet.")
+        else:
+            st.dataframe(sdf)
+
+        st.markdown("#### Accounts (Chart of Accounts)")
+        adf = pd.DataFrame(list_accounts(company_id=company_id))
+        if adf.empty:
+            st.info("No accounts yet.")
+        else:
+            st.dataframe(adf)
 
 
 # -------------------
@@ -649,7 +751,7 @@ def app_user_management():
     company_id = admin["company_id"]
 
     st.subheader(
-        f"User Management – {admin.get('company_name','')} ({admin.get('company_code','')})"
+        f"User Management – {admin['company_name']} ({admin['company_code']})"
     )
 
     st.markdown("### Create New User")
@@ -659,31 +761,45 @@ def app_user_management():
         pw1 = st.text_input("Password", type="password")
         pw2 = st.text_input("Confirm Password", type="password")
         new_role = st.selectbox("Role", ["user", "admin"], index=0)
-        can_create_voucher = st.checkbox("Can create vouchers", value=True)
-        can_approve_voucher = st.checkbox("Can approve vouchers", value=False)
-        can_manage_users = st.checkbox("Can manage users", value=False)
-        submitted = st.form_submit_button("Create User")
 
-    if submitted:
-        if not new_username or not pw1 or not pw2:
-            st.error("Username and both password fields are required.")
-        elif pw1 != pw2:
-            st.error("Passwords do not match.")
-        else:
-            err = create_user_for_company(
-                company_id=company_id,
-                username=new_username,
-                password=pw1,
-                role=new_role,
-                can_create_voucher=can_create_voucher,
-                can_approve_voucher=can_approve_voucher,
-                can_manage_users=can_manage_users,
-                actor_username=admin_name,
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            can_create_voucher = st.checkbox(
+                "Can create vouchers",
+                value=True,
             )
-            if err:
-                st.error(err)
+        with col2:
+            can_approve_voucher = st.checkbox(
+                "Can approve vouchers",
+                value=(new_role == "admin"),
+            )
+        with col3:
+            can_manage_users = st.checkbox(
+                "Can manage users",
+                value=(new_role == "admin"),
+            )
+
+        submitted = st.form_submit_button("Create User")
+        if submitted:
+            if not new_username or not pw1 or not pw2:
+                st.error("Username and both password fields are required.")
+            elif pw1 != pw2:
+                st.error("Passwords do not match.")
             else:
-                st.success(f"User '{new_username}' created.")
+                err = create_user_for_company(
+                    company_id=company_id,
+                    username=new_username,
+                    password=pw1,
+                    role=new_role,
+                    can_create_voucher=can_create_voucher,
+                    can_approve_voucher=can_approve_voucher,
+                    can_manage_users=can_manage_users,
+                    actor_username=admin_name,
+                )
+                if err:
+                    st.error(err)
+                else:
+                    st.success(f"User '{new_username}' created.")
 
     st.markdown("---")
     st.markdown("### Existing Users")
@@ -694,32 +810,95 @@ def app_user_management():
         return
 
     for u in users:
-        st.markdown(f"**{u['username']}** – {u.get('role','')}")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            c_create = st.checkbox(
-                "Can create vouchers",
-                value=bool(u.get("can_create_voucher")),
-                key=f"edit_create_{u['id']}",
-            )
-        with col2:
-            c_approve = st.checkbox(
-                "Can approve vouchers",
-                value=bool(u.get("can_approve_voucher")),
-                key=f"edit_approve_{u['id']}",
-            )
-        with col3:
-            c_manage = st.checkbox(
-                "Can manage users",
-                value=bool(u.get("can_manage_users")),
-                key=f"edit_manage_{u['id']}",
-            )
-        # NOTE: updating existing permissions would need an update_user_permissions()
-        # which is not wired here to keep this example simple.
+        with st.expander(
+            f"{u['username']} (role: {u['role']})",
+            expanded=False,
+        ):
+            with st.form(f"edit_user_{u['id']}"):
+                role = st.selectbox(
+                    "Role",
+                    ["user", "admin"],
+                    index=0 if u["role"] == "user" else 1,
+                    key=f"edit_role_{u['id']}",
+                )
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    c_create = st.checkbox(
+                        "Can create vouchers",
+                        value=bool(u["can_create_voucher"]),
+                        key=f"edit_create_{u['id']}",
+                    )
+                with col2:
+                    c_approve = st.checkbox(
+                        "Can approve vouchers",
+                        value=bool(u["can_approve_voucher"]),
+                        key=f"edit_approve_{u['id']}",
+                    )
+                with col3:
+                    c_manage = st.checkbox(
+                        "Can manage users",
+                        value=bool(u["can_manage_users"]),
+                        key=f"edit_manage_{u['id']}",
+                    )
+
+                save_btn = st.form_submit_button("Save Changes")
+                if save_btn:
+                    err = update_user_permissions(
+                        actor_username=admin_name,
+                        user_id=u["id"],
+                        company_id=company_id,
+                        role=role,
+                        can_create_voucher=c_create,
+                        can_approve_voucher=c_approve,
+                        can_manage_users=c_manage,
+                    )
+                    if err:
+                        st.error(err)
+                    else:
+                        st.success("Permissions updated.")
 
 
 # -------------------
-# Main
+# Account page
+# -------------------
+
+def app_account():
+    require_login()
+    user = current_user()
+
+    st.subheader("My Account")
+
+    st.markdown(f"**Username:** {user['username']}")
+    st.markdown(f"**Role:** {user['role']}")
+    st.markdown(f"**Company:** {user['company_name']} ({user['company_code']})")
+
+    st.markdown("---")
+
+
+# -------------------
+# DB Browser (admin)
+# -------------------
+
+def app_db_browser():
+    require_admin()
+    st.subheader("DB Browser (admin only)")
+
+    query = st.text_area(
+        "SQL Query", "SELECT * FROM vouchers ORDER BY id DESC LIMIT 50;"
+    )
+    if st.button("Run Query"):
+        try:
+            with connect() as conn:
+                df = pd.read_sql_query(query, conn)
+            st.dataframe(df)
+        except psycopg2.Error as e:
+            st.error(f"Database error: {e}")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+
+# -------------------
+# Main entry
 # -------------------
 
 def main():
@@ -736,12 +915,21 @@ def main():
 
     st.sidebar.markdown(
         f"**User:** {user['username']}  "
-        f"<br/>**Company:** {user.get('company_name','')} ({user.get('company_code','')})",
+        f"<br/>**Company:** {user['company_name']} ({user['company_code']})",
         unsafe_allow_html=True,
     )
-    logout_button()
+    if st.sidebar.button("Logout"):
+        st.session_state["user"] = None
+        st.rerun()
 
-    menu = ["Vouchers", "Invoices", "CRM", "User Management"]
+    menu = ["Vouchers", "Invoices", "CRM", "Reports", "Account"]
+
+    if user.get("can_manage_users", False):
+        menu.append("User Management")
+
+    if user["role"] == "admin":
+        menu.append("DB Browser")
+
     choice = st.sidebar.radio("Go to", menu)
 
     if choice == "Vouchers":
@@ -750,8 +938,14 @@ def main():
         app_invoices()
     elif choice == "CRM":
         app_crm()
+    elif choice == "Reports":
+        app_reports()
     elif choice == "User Management":
         app_user_management()
+    elif choice == "DB Browser":
+        app_db_browser()
+    elif choice == "Account":
+        app_account()
 
 
 if __name__ == "__main__":
