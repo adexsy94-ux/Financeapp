@@ -4,6 +4,7 @@
 import streamlit as st
 import pandas as pd
 import psycopg2
+from typing import List, Dict
 
 from db_config import init_schema, connect
 from auth_module import (
@@ -36,6 +37,9 @@ from vouchers_module import (
     create_voucher,
     change_voucher_status,
     delete_voucher,
+    get_voucher,
+    list_voucher_lines,
+    update_voucher,
 )
 from invoices_module import (
     list_invoices,
@@ -230,7 +234,7 @@ def app_vouchers():
         file_bytes = uploaded.read()
 
     st.markdown("**Voucher Lines**")
-    lines = []
+    lines: List[Dict] = []
     num_lines = st.number_input(
         "Number of lines", min_value=1, max_value=20, value=1, step=1
     )
@@ -315,7 +319,6 @@ def app_vouchers():
 
     if save_clicked:
         if validation_errors:
-            # Do not call create_voucher – just explain
             st.error(
                 "Voucher not saved because one or more line totals are higher than the "
                 "remaining invoice balances shown above. Please adjust the Amount, VAT, "
@@ -337,6 +340,7 @@ def app_vouchers():
                 st.error(err)
             else:
                 st.success("Voucher created successfully.")
+                st.experimental_rerun()
 
     st.markdown("---")
     st.subheader("Recent Vouchers")
@@ -345,6 +349,179 @@ def app_vouchers():
     if not vdf.empty:
         display_cols = [c for c in vdf.columns if c not in ("file_data",)]
         st.dataframe(vdf[display_cols])
+
+        # ------------ Edit / Delete Voucher ------------
+        st.markdown("### Edit / Delete Voucher")
+
+        voucher_ids = vdf["id"].tolist()
+        if voucher_ids:
+            edit_vid = st.selectbox(
+                "Select Voucher ID to edit",
+                voucher_ids,
+                format_func=lambda x: f"ID {x}",
+                key="edit_voucher_id",
+            )
+
+            if edit_vid:
+                # Load full voucher + lines
+                header = get_voucher(company_id=company_id, voucher_id=int(edit_vid))
+                lines_existing = list_voucher_lines(
+                    company_id=company_id, voucher_id=int(edit_vid)
+                )
+
+                with st.form("edit_voucher_form"):
+                    st.markdown("**Voucher Header**")
+                    ev_vendor = st.selectbox(
+                        "Vendor (from CRM)",
+                        vendor_options,
+                        index=vendor_options.index(header["vendor"])
+                        if header["vendor"] in vendor_options
+                        else 0,
+                        key="ev_vendor",
+                    )
+                    ev_requester = st.selectbox(
+                        "Requester (Staff in CRM)",
+                        requester_options,
+                        index=requester_options.index(header["requester"])
+                        if header["requester"] in requester_options
+                        else 0,
+                        key="ev_requester",
+                    )
+                    ev_invoice_ref = st.text_input(
+                        "Invoice / Reference",
+                        value=header.get("invoice_ref") or "",
+                        key="ev_invoice_ref",
+                    )
+
+                    base_currencies_edit = ["NGN", "USD", "GBP", "EUR"]
+                    currencies_edit = base_currencies_edit.copy()
+                    if header["currency"] not in currencies_edit:
+                        currencies_edit.append(header["currency"])
+
+                    ev_currency = st.selectbox(
+                        "Currency",
+                        currencies_edit,
+                        index=currencies_edit.index(header["currency"]),
+                        key="ev_currency",
+                    )
+
+                    ev_uploaded = st.file_uploader(
+                        "Replace supporting document (optional)",
+                        type=["pdf", "jpg", "png"],
+                        key="ev_voucher_file",
+                    )
+                    ev_file_name = None
+                    ev_file_bytes = None
+                    if ev_uploaded is not None:
+                        ev_file_name = ev_uploaded.name
+                        ev_file_bytes = ev_uploaded.read()
+
+                    st.markdown("**Voucher Lines (Edit)**")
+                    ev_lines: List[Dict] = []
+                    num_ev_lines = st.number_input(
+                        "Number of lines (edit mode)",
+                        min_value=1,
+                        max_value=20,
+                        value=max(1, len(lines_existing)),
+                        step=1,
+                        key="ev_num_lines",
+                    )
+
+                    for i in range(int(num_ev_lines)):
+                        st.markdown(f"**Line {i+1}**")
+                        col1, col2, col3, col4, col5 = st.columns([3, 1, 2, 1, 1])
+
+                        existing = (
+                            lines_existing[i] if i < len(lines_existing) else {}
+                        )
+                        with col1:
+                            desc = st.text_input(
+                                "Description",
+                                value=existing.get("description") or "",
+                                key=f"ev_line_desc_{i}",
+                            )
+                        with col2:
+                            amt = st.number_input(
+                                "Amount",
+                                min_value=0.0,
+                                step=0.01,
+                                value=float(existing.get("amount") or 0.0),
+                                key=f"ev_line_amt_{i}",
+                            )
+                        with col3:
+                            acct = st.selectbox(
+                                "Expense / Asset Account (Chart of Accounts)",
+                                account_options,
+                                index=account_options.index(
+                                    existing.get("account_name")
+                                )
+                                if existing.get("account_name") in account_options
+                                else 0,
+                                key=f"ev_line_acct_{i}",
+                            )
+                        with col4:
+                            vat = st.number_input(
+                                "VAT %",
+                                min_value=0.0,
+                                step=0.5,
+                                value=float(existing.get("vat_percent") or 0.0),
+                                key=f"ev_line_vat_{i}",
+                            )
+                        with col5:
+                            wht = st.number_input(
+                                "WHT %",
+                                min_value=0.0,
+                                step=0.5,
+                                value=float(existing.get("wht_percent") or 0.0),
+                                key=f"ev_line_wht_{i}",
+                            )
+
+                        ev_lines.append(
+                            {
+                                "description": desc,
+                                "amount": amt,
+                                "account_name": acct,
+                                "vat_percent": vat,
+                                "wht_percent": wht,
+                            }
+                        )
+
+                    col_ev1, col_ev2 = st.columns(2)
+                    with col_ev1:
+                        save_edit = st.form_submit_button("Save Voucher Changes")
+                    with col_ev2:
+                        delete_edit = st.form_submit_button("Delete This Voucher")
+
+                    if save_edit:
+                        err = update_voucher(
+                            company_id=company_id,
+                            voucher_id=int(edit_vid),
+                            username=username,
+                            vendor=ev_vendor,
+                            requester=ev_requester,
+                            invoice_ref=ev_invoice_ref,
+                            currency=ev_currency,
+                            lines=ev_lines,
+                            file_name=ev_file_name,
+                            file_bytes=ev_file_bytes,
+                        )
+                        if err:
+                            st.error(err)
+                        else:
+                            st.success("Voucher updated successfully.")
+                            st.experimental_rerun()
+
+                    if delete_edit:
+                        err = delete_voucher(
+                            company_id=company_id,
+                            voucher_id=int(edit_vid),
+                            actor_username=username,
+                        )
+                        if err:
+                            st.error(err)
+                        else:
+                            st.success("Voucher deleted.")
+                            st.experimental_rerun()
 
         st.markdown("**Update Voucher Status**")
 
@@ -480,28 +657,30 @@ def app_invoices():
         file_bytes = uploaded.read()
 
     if st.button("Save Invoice"):
-        err = create_invoice(
-            company_id=company_id,
-            username=username,
-            invoice_number="",  # let backend auto-generate based on timestamp
-            vendor_invoice_number=vendor_invoice_number,
-            vendor=vendor,
-            summary=summary,
-            vatable_amount=vatable_amount,
-            non_vatable_amount=non_vatable_amount,
-            vat_rate=vat_rate,
-            wht_rate=wht_rate,
-            terms=terms,
-            payable_account=payable_account,
-            expense_asset_account=expense_asset_account,
-            currency=currency,
-            file_name=file_name,
-            file_bytes=file_bytes,
-        )
-        if err:
-            st.error(err)
+        try:
+            _ = create_invoice(
+                company_id=company_id,
+                username=username,
+                invoice_number="",  # let backend auto-generate
+                vendor_invoice_number=vendor_invoice_number,
+                vendor=vendor,
+                summary=summary,
+                vatable_amount=vatable_amount,
+                vat_rate=vat_rate,
+                wht_rate=wht_rate,
+                non_vatable_amount=non_vatable_amount,
+                terms=terms,
+                payable_account=payable_account,
+                expense_asset_account=expense_asset_account,
+                currency=currency,
+                file_name=file_name,
+                file_data=file_bytes,
+            )
+        except Exception as ex:
+            st.error(str(ex))
         else:
             st.success("Invoice created successfully.")
+            st.experimental_rerun()
 
     st.markdown("---")
     st.subheader("Recent Invoices")
@@ -512,6 +691,160 @@ def app_invoices():
                 lambda v: f"{v:,.2f}" if v is not None else ""
             )
         st.dataframe(idf)
+
+        # ------------ Edit / Delete Invoice ------------
+        st.markdown("### Edit / Delete Invoice")
+
+        invoice_ids = idf["id"].tolist()
+        edit_iid = st.selectbox(
+            "Select Invoice ID to edit",
+            invoice_ids,
+            format_func=lambda x: f"ID {x}",
+            key="edit_invoice_id",
+        )
+
+        if edit_iid:
+            row = idf[idf["id"] == edit_iid].iloc[0].to_dict()
+
+            with st.form("edit_invoice_form"):
+                ev_vendor = st.selectbox(
+                    "Vendor (from CRM)",
+                    vendor_options,
+                    index=vendor_options.index(row["vendor"])
+                    if row["vendor"] in vendor_options
+                    else 0,
+                    key="ei_vendor",
+                )
+                ev_vendor_inv_no = st.text_input(
+                    "Vendor Invoice Number",
+                    value=row.get("vendor_invoice_number") or "",
+                    key="ei_vendor_inv_no",
+                )
+                ev_summary = st.text_area(
+                    "Summary",
+                    value=row.get("summary") or "",
+                    key="ei_summary",
+                )
+
+                ev_vatable_amount = st.number_input(
+                    "Vatable Amount",
+                    min_value=0.0,
+                    step=0.01,
+                    value=float(row.get("vatable_amount") or 0.0),
+                    key="ei_vatable",
+                )
+                ev_vat_rate = st.number_input(
+                    "VAT Rate (%)",
+                    min_value=0.0,
+                    step=0.5,
+                    value=float(row.get("vat_rate") or 0.0),
+                    key="ei_vat_rate",
+                )
+                ev_wht_rate = st.number_input(
+                    "WHT Rate (%)",
+                    min_value=0.0,
+                    step=0.5,
+                    value=float(row.get("wht_rate") or 0.0),
+                    key="ei_wht_rate",
+                )
+                ev_non_vatable = st.number_input(
+                    "Non-vatable Amount",
+                    min_value=0.0,
+                    step=0.01,
+                    value=float(row.get("non_vatable_amount") or 0.0),
+                    key="ei_non_vatable",
+                )
+
+                ev_terms = st.text_area(
+                    "Terms",
+                    value=row.get("terms") or "",
+                    key="ei_terms",
+                )
+
+                base_currencies_edit = ["NGN", "USD", "GBP", "EUR"]
+                currencies_edit = base_currencies_edit.copy()
+                if row.get("currency") not in currencies_edit:
+                    currencies_edit.append(row.get("currency"))
+
+                ev_currency = st.selectbox(
+                    "Currency",
+                    currencies_edit,
+                    index=currencies_edit.index(row.get("currency")),
+                    key="ei_currency",
+                )
+
+                ev_payable_account = st.selectbox(
+                    "Payable Account (Chart of Accounts)",
+                    payable_options,
+                    index=payable_options.index(row.get("payable_account"))
+                    if row.get("payable_account") in payable_options
+                    else 0,
+                    key="ei_payable",
+                )
+                ev_expense_asset = st.selectbox(
+                    "Expense / Asset Account (Chart of Accounts)",
+                    expense_asset_options,
+                    index=expense_asset_options.index(
+                        row.get("expense_asset_account")
+                    )
+                    if row.get("expense_asset_account") in expense_asset_options
+                    else 0,
+                    key="ei_expense_asset",
+                )
+
+                ev_uploaded = st.file_uploader(
+                    "Replace invoice document (optional)",
+                    type=["pdf", "jpg", "png"],
+                    key="ei_file",
+                )
+                ev_file_name = None
+                ev_file_bytes = None
+                if ev_uploaded is not None:
+                    ev_file_name = ev_uploaded.name
+                    ev_file_bytes = ev_uploaded.read()
+
+                col_ei1, col_ei2 = st.columns(2)
+                with col_ei1:
+                    save_edit = st.form_submit_button("Save Invoice Changes")
+                with col_ei2:
+                    delete_edit = st.form_submit_button("Delete This Invoice")
+
+                if save_edit:
+                    err = update_invoice(
+                        company_id=company_id,
+                        invoice_id=int(edit_iid),
+                        vendor_invoice_number=ev_vendor_inv_no,
+                        vendor=ev_vendor,
+                        summary=ev_summary,
+                        vatable_amount=ev_vatable_amount,
+                        vat_rate=ev_vat_rate,
+                        wht_rate=ev_wht_rate,
+                        non_vatable_amount=ev_non_vatable,
+                        terms=ev_terms,
+                        payable_account=ev_payable_account,
+                        expense_asset_account=ev_expense_asset,
+                        currency=ev_currency,
+                        username=username,
+                        file_name=ev_file_name,
+                        file_data=ev_file_bytes,
+                    )
+                    if err:
+                        st.error(err)
+                    else:
+                        st.success("Invoice updated successfully.")
+                        st.experimental_rerun()
+
+                if delete_edit:
+                    err = delete_invoice(
+                        company_id=company_id,
+                        invoice_id=int(edit_iid),
+                        username=username,
+                    )
+                    if err:
+                        st.error(err)
+                    else:
+                        st.success("Invoice deleted.")
+                        st.experimental_rerun()
     else:
         st.info("No invoices yet.")
 
@@ -556,10 +889,73 @@ def app_crm():
                 st.error(err)
             else:
                 st.success("Staff saved.")
+                st.experimental_rerun()
 
     staff_rows = list_staff(company_id=company_id)
     if staff_rows:
-        st.dataframe(pd.DataFrame(staff_rows))
+        sdf = pd.DataFrame(staff_rows)
+        st.dataframe(sdf)
+
+        # Edit / delete staff
+        with st.expander("Edit / Delete Staff"):
+            staff_ids = sdf["id"].tolist()
+            selected_staff_id = st.selectbox(
+                "Select Staff",
+                staff_ids,
+                format_func=lambda sid: f"{sid} - {sdf[sdf['id'] == sid].iloc[0]['first_name']} {sdf[sdf['id'] == sid].iloc[0]['last_name']}",
+                key="edit_staff_id",
+            )
+            if selected_staff_id:
+                row = sdf[sdf["id"] == selected_staff_id].iloc[0].to_dict()
+                with st.form("edit_staff_form"):
+                    es_first = st.text_input("First Name", value=row["first_name"])
+                    es_last = st.text_input("Last Name", value=row["last_name"])
+                    es_email = st.text_input("Email", value=row.get("email") or "")
+                    es_phone = st.text_input("Phone", value=row.get("phone") or "")
+                    es_status = st.selectbox(
+                        "Status",
+                        ["Active", "Inactive"],
+                        index=0
+                        if (row.get("status") or "Active") == "Active"
+                        else 1,
+                    )
+                    es_position = st.text_input(
+                        "Position / Role", value=row.get("position") or ""
+                    )
+                    col_s1, col_s2 = st.columns(2)
+                    with col_s1:
+                        save_staff = st.form_submit_button("Save Staff Changes")
+                    with col_s2:
+                        delete_staff_btn = st.form_submit_button("Delete Staff")
+
+                    if save_staff:
+                        err = upsert_staff(
+                            company_id=company_id,
+                            staff_id=int(selected_staff_id),
+                            first_name=es_first,
+                            last_name=es_last,
+                            email=es_email,
+                            phone=es_phone,
+                            status=es_status,
+                            position=es_position,
+                        )
+                        if err:
+                            st.error(err)
+                        else:
+                            st.success("Staff updated.")
+                            st.experimental_rerun()
+
+                    if delete_staff_btn:
+                        err = delete_staff(
+                            company_id=company_id,
+                            staff_id=int(selected_staff_id),
+                            username=username,
+                        )
+                        if err:
+                            st.error(err)
+                        else:
+                            st.success("Staff deleted.")
+                            st.experimental_rerun()
     else:
         st.info("No staff yet.")
 
@@ -588,10 +984,66 @@ def app_crm():
                     username=username,
                 )
                 st.success("Vendor saved.")
+                st.experimental_rerun()
 
     vdf = pd.DataFrame(list_vendors(company_id=company_id))
     if not vdf.empty:
         st.dataframe(vdf)
+
+        # Edit / delete vendor
+        with st.expander("Edit / Delete Vendor"):
+            vendor_ids = vdf["id"].tolist()
+            selected_vid = st.selectbox(
+                "Select Vendor",
+                vendor_ids,
+                format_func=lambda vid: f"{vid} - {vdf[vdf['id'] == vid].iloc[0]['name']}",
+                key="edit_vendor_id",
+            )
+            if selected_vid:
+                row = vdf[vdf["id"] == selected_vid].iloc[0].to_dict()
+                with st.form("edit_vendor_form"):
+                    ev_name = st.text_input("Vendor Name", value=row["name"])
+                    ev_contact = st.text_input(
+                        "Contact Person", value=row.get("contact_person") or ""
+                    )
+                    ev_bank = st.text_input(
+                        "Bank Name", value=row.get("bank_name") or ""
+                    )
+                    ev_bank_acct = st.text_input(
+                        "Bank Account", value=row.get("bank_account") or ""
+                    )
+                    ev_notes = st.text_area("Notes", value=row.get("notes") or "")
+
+                    col_v1, col_v2 = st.columns(2)
+                    with col_v1:
+                        save_vendor = st.form_submit_button("Save Vendor Changes")
+                    with col_v2:
+                        delete_vendor_btn = st.form_submit_button("Delete Vendor")
+
+                    if save_vendor:
+                        upsert_vendor(
+                            company_id=company_id,
+                            name=ev_name,
+                            contact_person=ev_contact,
+                            bank_name=ev_bank,
+                            bank_account=ev_bank_acct,
+                            notes=ev_notes,
+                            username=username,
+                        )
+                        st.success("Vendor updated.")
+                        st.experimental_rerun()
+
+                    if delete_vendor_btn:
+                        err = delete_vendor(
+                            company_id=company_id,
+                            vendor_id=int(selected_vid),
+                            username=username,
+                        )
+                        if err:
+                            st.error(err)
+                        else:
+                            st.success("Vendor deleted.")
+                            st.experimental_rerun()
     else:
         st.info("No vendors yet.")
 
@@ -620,6 +1072,7 @@ def app_crm():
                     username=username,
                 )
                 st.success("Account saved.")
+                st.experimental_rerun()
 
     all_accounts = list_accounts(company_id=company_id)
 
@@ -655,7 +1108,9 @@ def app_reports():
 
     st.subheader("Reports")
 
-    tab1, tab2, tab3 = st.tabs(["Voucher Register", "Invoice Register", "CRM / Master Data"])
+    tab1, tab2, tab3 = st.tabs(
+        ["Voucher Register", "Invoice Register", "CRM / Master Data"]
+    )
 
     # Voucher report
     with tab1:
@@ -664,7 +1119,6 @@ def app_reports():
         if vdf.empty:
             st.info("No vouchers yet.")
         else:
-            # Simple filters: by vendor and status if those columns exist
             if "vendor" in vdf.columns:
                 vendors = ["(All)"] + sorted(
                     [v for v in vdf["vendor"].dropna().unique().tolist()]
@@ -694,7 +1148,9 @@ def app_reports():
                 vendors = ["(All)"] + sorted(
                     [v for v in idf["vendor"].dropna().unique().tolist()]
                 )
-                vendor_filter = st.selectbox("Filter by Vendor", vendors, key="inv_vendor_filter")
+                vendor_filter = st.selectbox(
+                    "Filter by Vendor", vendors, key="inv_vendor_filter"
+                )
                 if vendor_filter != "(All)":
                     idf = idf[idf["vendor"] == vendor_filter]
 
@@ -702,7 +1158,9 @@ def app_reports():
                 currencies = ["(All)"] + sorted(
                     [c for c in idf["currency"].dropna().unique().tolist()]
                 )
-                currency_filter = st.selectbox("Filter by Currency", currencies, key="inv_currency_filter")
+                currency_filter = st.selectbox(
+                    "Filter by Currency", currencies, key="inv_currency_filter"
+                )
                 if currency_filter != "(All)":
                     idf = idf[idf["currency"] == currency_filter]
 
@@ -794,6 +1252,7 @@ def app_user_management():
                     st.error(err)
                 else:
                     st.success(f"User '{new_username}' created.")
+                    st.experimental_rerun()
 
     st.markdown("---")
     st.markdown("### Existing Users")
@@ -850,6 +1309,7 @@ def app_user_management():
                         st.error(err)
                     else:
                         st.success("Permissions updated.")
+                        st.experimental_rerun()
 
 
 # -------------------
