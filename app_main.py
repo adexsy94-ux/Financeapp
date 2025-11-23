@@ -19,17 +19,30 @@ from auth_module import (
 from crm_gateway import (
     list_vendors,
     upsert_vendor,
+    delete_vendor,
     list_accounts,
     upsert_account,
     list_staff,
     upsert_staff,
+    delete_staff,
+    delete_account,
     get_vendor_name_list,
     get_requester_options,
     get_payable_account_options,
     get_expense_asset_account_options,
 )
-from vouchers_module import list_vouchers, create_voucher, change_voucher_status
-from invoices_module import list_invoices, create_invoice
+from vouchers_module import (
+    list_vouchers,
+    create_voucher,
+    change_voucher_status,
+    delete_voucher,
+)
+from invoices_module import (
+    list_invoices,
+    create_invoice,
+    update_invoice,
+    delete_invoice,
+)
 from pdf_utils import build_voucher_pdf_bytes
 
 
