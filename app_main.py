@@ -21,6 +21,8 @@ from crm_gateway import (
     upsert_vendor,
     list_accounts,
     upsert_account,
+    list_staff,
+    upsert_staff,
     get_vendor_name_list,
     get_requester_options,
     get_payable_account_options,
@@ -64,7 +66,7 @@ def app_vouchers():
         file_bytes = uploaded.read()
 
     st.markdown("**Voucher Lines**")
-    lines: list[dict] = []
+    lines = []
     num_lines = st.number_input(
         "Number of lines", min_value=1, max_value=20, value=1, step=1
     )
@@ -92,7 +94,6 @@ def app_vouchers():
                 "WHT %", key=f"line_wht_{i}", min_value=0.0, step=0.5
             )
 
-        # Keys must match vouchers_module.create_voucher expectations
         lines.append(
             {
                 "description": desc,
@@ -300,7 +301,7 @@ def app_invoices():
 
 
 # -------------------
-# CRM (Vendors & Accounts)
+# CRM (Staff, Vendors & Accounts)
 # -------------------
 
 def app_crm():
@@ -309,6 +310,46 @@ def app_crm():
     username = user["username"]
     company_id = user["company_id"]
 
+    # ---- Staff ----
+    st.subheader("Staff")
+
+    with st.form("staff_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            first_name = st.text_input("First Name")
+            email = st.text_input("Email")
+            phone = st.text_input("Phone")
+        with col2:
+            last_name = st.text_input("Last Name")
+            status = st.selectbox("Status", ["Active", "Inactive"], index=0)
+            position = st.text_input("Position / Role")
+
+        # For now we only create new staff (no edit ID yet)
+        submitted_staff = st.form_submit_button("Save Staff")
+        if submitted_staff:
+            err = upsert_staff(
+                company_id=company_id,
+                first_name=first_name,
+                last_name=last_name,
+                email=email,
+                phone=phone,
+                status=status,
+                position=position,
+                staff_id=None,
+            )
+            if err:
+                st.error(err)
+            else:
+                st.success("Staff saved.")
+
+    staff_rows = list_staff(company_id=company_id)
+    if staff_rows:
+        st.dataframe(pd.DataFrame(staff_rows))
+    else:
+        st.info("No staff yet.")
+
+    st.markdown("---")
+    # ---- Vendors ----
     st.subheader("Vendors")
 
     with st.form("vendor_form"):
@@ -317,8 +358,8 @@ def app_crm():
         bank_name = st.text_input("Bank Name")
         bank_account = st.text_input("Bank Account")
         notes = st.text_area("Notes")
-        submitted = st.form_submit_button("Save Vendor")
-        if submitted:
+        submitted_vendor = st.form_submit_button("Save Vendor")
+        if submitted_vendor:
             if not name:
                 st.error("Vendor name is required.")
             else:
@@ -340,6 +381,7 @@ def app_crm():
         st.info("No vendors yet.")
 
     st.markdown("---")
+    # ---- Accounts ----
     st.subheader("Accounts (Chart of Accounts)")
 
     with st.form("account_form"):
@@ -350,8 +392,8 @@ def app_crm():
             ["Asset", "Liability", "Equity", "Expense", "Income"],
             index=0,
         )
-        submitted = st.form_submit_button("Save Account")
-        if submitted:
+        submitted_account = st.form_submit_button("Save Account")
+        if submitted_account:
             if not code or not name:
                 st.error("Code and name are required.")
             else:
@@ -364,14 +406,11 @@ def app_crm():
                 )
                 st.success("Account saved.")
 
-    # Fetch all accounts once
     all_accounts = list_accounts(company_id=company_id)
 
-    # Payable = Liability / Equity (same logic as get_payable_account_options)
     payable_accounts = [
         a for a in all_accounts if a.get("type") in ("Liability", "Equity")
     ]
-    # Expense/Asset
     expense_asset_accounts = [
         a for a in all_accounts if a.get("type") in ("Expense", "Asset")
     ]
@@ -508,7 +547,7 @@ def app_user_management():
 
 
 # -------------------
-# Account page (simple info for now)
+# Account page
 # -------------------
 
 def app_account():
