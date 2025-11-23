@@ -6,7 +6,11 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from db_config import connect, INVOICE_TABLE_SQL, log_action
-from crm_gateway import get_vendor_name_list, get_payable_account_options, get_expense_asset_account_options
+from crm_gateway import (
+    get_vendor_name_list,
+    get_payable_account_options,
+    get_expense_asset_account_options,
+)
 
 
 def init_invoice_schema() -> None:
@@ -15,29 +19,29 @@ def init_invoice_schema() -> None:
         conn.commit()
 
 
-def _now_ts():
-    return datetime.utcnow()
-
-
 # ------------------------
 # Helpers
 # ------------------------
+
+def _now_ts() -> datetime:
+    return datetime.utcnow()
+
 
 def compute_invoice_totals(
     vatable_amount: float,
     non_vatable_amount: float,
     vat_rate: float,
     wht_rate: float,
-) -> Dict:
-    vatable_amount = float(vatable_amount or 0.0)
-    non_vatable_amount = float(non_vatable_amount or 0.0)
+) -> Dict[str, float]:
+    vatable = float(vatable_amount or 0.0)
+    non_vatable = float(non_vatable_amount or 0.0)
     vat_rate = float(vat_rate or 0.0)
     wht_rate = float(wht_rate or 0.0)
 
-    vat_amount = round(vatable_amount * vat_rate / 100.0, 2)
-    wht_amount = round(vatable_amount * wht_rate / 100.0, 2)
-    subtotal = round(vatable_amount + non_vatable_amount, 2)
-    total_amount = round(subtotal + vat_amount - wht_amount, 2)
+    vat_amount = round(vatable * vat_rate / 100.0, 2)
+    wht_amount = round(vatable * wht_rate / 100.0, 2)
+    subtotal = vatable + non_vatable
+    total_amount = subtotal + vat_amount - wht_amount
 
     return {
         "vat_amount": vat_amount,
@@ -112,7 +116,18 @@ def create_invoice(
     file_name: Optional[str] = None,
     file_bytes: Optional[bytes] = None,
 ) -> Optional[str]:
+    """
+    Create an invoice.
+
+    NOTE: invoice_number is auto-generated if blank, using UTC timestamp:
+          INV-YYYYMMDDHHMMSS
+    """
+    # --- Auto-generate invoice number if blank, using date/time stamp ---
     invoice_number = (invoice_number or "").strip()
+    if not invoice_number:
+        ts_code = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        invoice_number = f"INV-{ts_code}"
+
     vendor_invoice_number = (vendor_invoice_number or "").strip() or None
     vendor = (vendor or "").strip()
     summary = (summary or "").strip() or None
@@ -121,8 +136,6 @@ def create_invoice(
     expense_asset_account = (expense_asset_account or "").strip() or None
     currency = (currency or "").strip() or "NGN"
 
-    if not invoice_number:
-        return "Invoice number is required."
     if not vendor:
         return "Vendor is required."
 
@@ -162,9 +175,11 @@ def create_invoice(
                     vat_amount, wht_amount,
                     subtotal, total_amount,
                     terms,
-                    payable_account, expense_asset_account,
+                    payable_account,
+                    expense_asset_account,
                     currency,
-                    file_name, file_data,
+                    file_name,
+                    file_data,
                     last_modified
                 )
                 VALUES (
@@ -207,7 +222,13 @@ def create_invoice(
             )
             conn.commit()
 
-        log_action(username, "create_invoice", "invoices", ref=invoice_number, company_id=company_id)
+        log_action(
+            username,
+            "create_invoice",
+            "invoices",
+            ref=invoice_number,
+            company_id=company_id,
+        )
         return None
     except Exception as ex:
         return f"Error creating invoice: {ex}"
