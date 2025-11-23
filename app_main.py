@@ -1,5 +1,11 @@
+# app_main.py – Finance app main entrypoint
+
 import streamlit as st
 import pandas as pd
+
+# --- Safety alias: allow old code to call st.markmarkdown without crashing ---
+if not hasattr(st, "markmarkdown"):
+    st.markmarkdown = st.markdown
 
 from db_config import init_schema, connect
 from auth_module import (
@@ -36,6 +42,8 @@ from invoices_module import (
     delete_invoice,
 )
 from pdf_utils import build_voucher_pdf_bytes
+
+# ... rest of your app_main.py (app_vouchers, app_invoices, app_crm, main(), etc.)
 
 
 # -------------------
