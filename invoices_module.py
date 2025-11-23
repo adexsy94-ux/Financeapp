@@ -3,7 +3,7 @@
 
 from contextlib import closing
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from db_config import connect, INVOICE_TABLE_SQL, log_action
 from crm_gateway import (
@@ -254,10 +254,6 @@ def create_invoice(
 # List / query invoices
 # ------------------------
 
-from contextlib import closing
-from typing import List, Dict
-from db_config import connect
-
 def list_invoices(company_id: int) -> List[Dict]:
     """
     List invoices for a company.
@@ -349,3 +345,35 @@ def list_invoices(company_id: int) -> List[Dict]:
             }
         )
     return result
+
+
+# ------------------------
+# Update / delete stubs (to satisfy app_main imports)
+# ------------------------
+
+def update_invoice(*args: Any, **kwargs: Any) -> None:
+    """
+    Placeholder update_invoice.
+
+    app_main.py imports this symbol; without it, the app crashes on import.
+    We accept *args and **kwargs so any call signature will be accepted.
+
+    For now, this is a NO-OP. Once we see the exact way app_invoices()
+    calls update_invoice (from a traceback), we can wire real update logic.
+    """
+    # NO-OP: you can replace this later with a full update implementation.
+    return None
+
+
+def delete_invoice(*args: Any, **kwargs: Any) -> None:
+    """
+    Placeholder delete_invoice.
+
+    app_main.py imports this symbol; without it, the app crashes on import.
+    We accept *args and **kwargs so any call signature will be accepted.
+
+    For now, this is a NO-OP. Once we see the exact way app_invoices()
+    calls delete_invoice (from a traceback), we can wire real delete logic.
+    """
+    # NO-OP: you can replace this later with a full delete implementation.
+    return None
