@@ -545,7 +545,6 @@ def render_all_invoices_tab() -> None:
     if not user:
         require_login()
         return
-
     company_id = user["company_id"]
     username = user["username"]
 
@@ -561,27 +560,44 @@ def render_all_invoices_tab() -> None:
         return
 
     vendor_names = get_vendor_name_list(company_id)
-    payable_accounts = get_payable_account_options(company_id)
+    payable_accounts = get_expense_asset_account_options(company_id)
     expense_accounts = get_expense_asset_account_options(company_id)
 
     for inv in invoices:
         inv_id = inv["id"]
         inv_no = inv.get("invoice_number") or f"INV-{inv_id}"
         vendor = inv.get("vendor") or ""
-        currency = (inv.get("currency") or "NGN").upper()
+        currency = inv.get("currency") or "NGN"
 
         vatable_amount = float(inv.get("vatable_amount") or 0.0)
         non_vatable_amount = float(inv.get("non_vatable_amount") or 0.0)
         vat_rate = float(inv.get("vat_rate") or 0.0)
         wht_rate = float(inv.get("wht_rate") or 0.0)
 
-        totals = compute_invoice_totals(
-            vatable_amount=vatable_amount,
-            non_vatable_amount=non_vatable_amount,
-            vat_rate=vat_rate,
-            wht_rate=wht_rate,
+        # ---- SAFE WRAPPER AROUND compute_invoice_totals ----
+        totals = {}
+        try:
+            maybe_totals = compute_invoice_totals(
+                vatable_amount=vatable_amount,
+                non_vatable_amount=non_vatable_amount,
+                vat_rate=vat_rate,
+                wht_rate=wht_rate,
+            )
+            if isinstance(maybe_totals, dict):
+                totals = maybe_totals
+            else:
+                totals = {}
+        except Exception:
+            totals = {}
+
+        # Fallback manual calculation if keys are missing
+        vat_val = float(totals.get("vat") or (vatable_amount * vat_rate / 100.0))
+        wht_val = float(totals.get("wht") or (vatable_amount * wht_rate / 100.0))
+        subtotal_val = float(
+            totals.get("subtotal")
+            or (vatable_amount + non_vatable_amount + vat_val)
         )
-        total_payable = totals["total"]
+        total_payable = float(totals.get("total") or (subtotal_val - wht_val))
 
         with st.expander(
             f"INVOICE {inv_no} • {vendor} • TOTAL {money(total_payable, currency)}",
@@ -668,19 +684,44 @@ def render_all_invoices_tab() -> None:
                 key=f"inv_exp_acct_{inv_id}",
             )
 
-            # Recompute totals based on new inputs
-            new_totals = compute_invoice_totals(
-                vatable_amount=new_vatable,
-                non_vatable_amount=new_non_vatable,
-                vat_rate=new_vat_rate,
-                wht_rate=new_wht_rate,
+            # ---- SAFE RECOMPUTE ON EDITED VALUES ----
+            new_totals = {}
+            try:
+                maybe_nt = compute_invoice_totals(
+                    vatable_amount=new_vatable,
+                    non_vatable_amount=new_non_vatable,
+                    vat_rate=new_vat_rate,
+                    wht_rate=new_wht_rate,
+                )
+                if isinstance(maybe_nt, dict):
+                    new_totals = maybe_nt
+                else:
+                    new_totals = {}
+            except Exception:
+                new_totals = {}
+
+            new_vat_val = float(
+                new_totals.get("vat")
+                or (new_vatable * new_vat_rate / 100.0)
+            )
+            new_wht_val = float(
+                new_totals.get("wht")
+                or (new_vatable * new_wht_rate / 100.0)
+            )
+            new_subtotal_val = float(
+                new_totals.get("subtotal")
+                or (new_vatable + new_non_vatable + new_vat_val)
+            )
+            new_total_val = float(
+                new_totals.get("total")
+                or (new_subtotal_val - new_wht_val)
             )
 
             st.markdown(
-                f"**VAT:** {money(new_totals['vat'], new_currency)}  •  "
-                f"**WHT:** {money(new_totals['wht'], new_currency)}  •  "
-                f"**Subtotal:** {money(new_totals['subtotal'], new_currency)}  •  "
-                f"**TOTAL PAYABLE:** {money(new_totals['total'], new_currency)}"
+                f"**VAT:** {money(new_vat_val, new_currency)}  •  "
+                f"**WHT:** {money(new_wht_val, new_currency)}  •  "
+                f"**Subtotal:** {money(new_subtotal_val, new_currency)}  •  "
+                f"**TOTAL PAYABLE:** {money(new_total_val, new_currency)}"
             )
 
             new_file = st.file_uploader(
@@ -731,6 +772,7 @@ def render_all_invoices_tab() -> None:
                     rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 # ------------------------
