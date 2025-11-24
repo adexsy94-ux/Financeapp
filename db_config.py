@@ -174,6 +174,7 @@ CREATE TABLE IF NOT EXISTS voucher_documents (
     file_name   TEXT NOT NULL,
     file_data   BYTEA NOT NULL,
     created_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (voucher_id, file_name)
 );
 """
@@ -284,9 +285,21 @@ def init_schema() -> None:
             "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;"
         )
 
-        # --- Lightweight migrations for voucher_documents table ---
+        # --- Lightweight migrations for existing voucher_lines table ---
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS company_id INTEGER;")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS line_no INTEGER;")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS description TEXT;")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS amount NUMERIC(18,2);")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS account_name TEXT;")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS vat_percent NUMERIC(5,2);")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS wht_percent NUMERIC(5,2);")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS vat_value NUMERIC(18,2);")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS wht_value NUMERIC(18,2);")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS total NUMERIC(18,2);")
+
+        # --- Lightweight migrations for existing voucher_documents table ---
         cur.execute(
-            "ALTER TABLE voucher_documents ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;"
+            "ALTER TABLE voucher_documents ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;"
         )
 
         conn.commit()
