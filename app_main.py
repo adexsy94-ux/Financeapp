@@ -1,4 +1,3 @@
-
 # app_main.py
 # Main Streamlit app wiring all modules together, with multi-tenant support
 
@@ -347,61 +346,6 @@ def app_vouchers():
         display_cols = [c for c in vdf.columns if c not in ("file_data",)]
         st.dataframe(vdf[display_cols])
 
-        st.markdown("**Update Voucher Status**")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            selected_id = st.number_input(
-                "Voucher ID",
-                min_value=0,
-                step=1,
-                value=0,
-                help="Enter the voucher ID you want to act on.",
-            )
-        with col2:
-            action = st.selectbox(
-                "Action",
-                ["--", "Submit for approval", "Mark as draft", "Approve", "Reject"],
-            )
-        with col3:
-            st.write(" ")
-
-        if st.button("Apply Action on Voucher"):
-            if selected_id <= 0:
-                st.error("Please enter a valid voucher ID.")
-            elif action == "--":
-                st.error("Please select an action.")
-            else:
-                new_status = None
-
-                if action == "Submit for approval":
-                    new_status = "submitted"
-                elif action == "Mark as draft":
-                    new_status = "draft"
-                elif action == "Approve":
-                    require_permission("can_approve_voucher")
-                    new_status = "approved"
-                elif action == "Reject":
-                    require_permission("can_approve_voucher")
-                    new_status = "rejected"
-
-                if new_status is None:
-                    st.error("Unknown action.")
-                else:
-                    err = change_voucher_status(
-                        company_id=company_id,
-                        voucher_id=int(selected_id),
-                        new_status=new_status,
-                        actor_username=username,
-                    )
-                    if err:
-                        st.error(err)
-                    else:
-                        st.success(
-                            f"Voucher {selected_id} updated to status '{new_status}'."
-                        )
-                        st.experimental_rerun()
-
         st.markdown("**Export to PDF**")
         pdf_id = st.number_input(
             "Voucher ID to export",
@@ -660,6 +604,10 @@ def app_reports():
     user = current_user()
     company_id = user["company_id"]
 
+    # Permissions for actions from reports
+    can_modify = bool(user.get("can_create_voucher") or user.get("can_approve_voucher"))
+    can_approve = bool(user.get("can_approve_voucher"))
+
     st.subheader("Reports")
 
     tab1, tab2, tab3 = st.tabs(["Voucher Register", "Invoice Register", "CRM / Master Data"])
@@ -690,6 +638,84 @@ def app_reports():
 
             st.dataframe(vdf)
 
+            st.markdown("### Voucher Actions (per voucher)")
+            for _, row in vdf.iterrows():
+                vid = int(row["id"])
+                header_text = f"#{vid} – {row.get('voucher_number', '')} – {row.get('vendor', '')} (Status: {row.get('status', '')})"
+                with st.expander(header_text, expanded=False):
+                    st.write("**Basic Info**")
+                    st.write(f"Voucher ID: {vid}")
+                    st.write(f"Voucher Number: {row.get('voucher_number', '')}")
+                    st.write(f"Vendor: {row.get('vendor', '')}")
+                    st.write(f"Requester: {row.get('requester', '')}")
+                    st.write(f"Invoice Ref: {row.get('invoice_ref', '')}")
+                    st.write(f"Currency: {row.get('currency', '')}")
+                    st.write(f"Status: {row.get('status', '')}")
+                    st.write(f"Created At: {row.get('created_at', '')}")
+                    st.write(f"Last Modified: {row.get('last_modified', '')}")
+                    st.write(f"Approved By: {row.get('approved_by', '')}")
+                    st.write(f"Approved At: {row.get('approved_at', '')}")
+
+                    if not can_modify:
+                        st.info("You have view-only access. Contact an admin to update or delete vouchers.")
+                    else:
+                        st.markdown("---")
+                        c1, c2, c3 = st.columns(3)
+                        current_status = (row.get("status") or "draft").lower()
+                        status_options = ["draft", "submitted", "approved", "rejected"]
+                        try:
+                            default_status_index = status_options.index(current_status)
+                        except ValueError:
+                            default_status_index = 0
+
+                        with c1:
+                            new_status = st.selectbox(
+                                "Change Status",
+                                status_options,
+                                index=default_status_index,
+                                key=f"v_status_{vid}",
+                            )
+
+                        with c2:
+                            if st.button(
+                                "Update Status",
+                                key=f"v_update_{vid}",
+                            ):
+                                if new_status in ("approved", "rejected") and not can_approve:
+                                    st.error("You do not have permission to approve or reject vouchers.")
+                                else:
+                                    err = change_voucher_status(
+                                        company_id=company_id,
+                                        voucher_id=vid,
+                                        new_status=new_status,
+                                        actor_username=user["username"],
+                                    )
+                                    if err:
+                                        st.error(err)
+                                    else:
+                                        st.success(f"Voucher {vid} updated to status '{new_status}'.")
+                                        st.experimental_rerun()
+
+                        with c3:
+                            if st.button(
+                                "Delete Voucher",
+                                key=f"v_delete_{vid}",
+                            ):
+                                # Optional: restrict deletes to approvers
+                                if not can_approve:
+                                    st.error("You do not have permission to delete vouchers.")
+                                else:
+                                    err = delete_voucher(
+                                        company_id=company_id,
+                                        voucher_id=vid,
+                                        actor_username=user["username"],
+                                    )
+                                    if err:
+                                        st.error(err)
+                                    else:
+                                        st.success(f"Voucher {vid} deleted.")
+                                        st.experimental_rerun()
+
     # Invoice report
     with tab2:
         st.markdown("### Invoice Register")
@@ -714,6 +740,204 @@ def app_reports():
                     idf = idf[idf["currency"] == currency_filter]
 
             st.dataframe(idf)
+
+            st.markdown("### Invoice Actions (per invoice)")
+
+            # CRM options for editing
+            vendor_options = get_vendor_name_list(company_id)
+            payable_options = get_payable_account_options(company_id)
+            expense_asset_options = get_expense_asset_account_options(company_id)
+
+            for _, row in idf.iterrows():
+                iid = int(row["id"])
+                header_text = f"#{iid} – {row.get('invoice_number', '')} – {row.get('vendor', '')} ({row.get('currency', '')})"
+                with st.expander(header_text, expanded=False):
+                    st.write("**Current Values**")
+                    st.write(f"Invoice ID: {iid}")
+                    st.write(f"Invoice Number: {row.get('invoice_number', '')}")
+                    st.write(f"Vendor: {row.get('vendor', '')}")
+                    st.write(f"Vendor Invoice No.: {row.get('vendor_invoice_number', '')}")
+                    st.write(f"Summary: {row.get('summary', '')}")
+                    st.write(f"Currency: {row.get('currency', '')}")
+                    st.write(f"Vatable Amount: {row.get('vatable_amount', '')}")
+                    st.write(f"Non-vatable Amount: {row.get('non_vatable_amount', '')}")
+                    st.write(f"VAT Rate: {row.get('vat_rate', '')}")
+                    st.write(f"WHT Rate: {row.get('wht_rate', '')}")
+                    st.write(f"Payable Account: {row.get('payable_account', '')}")
+                    st.write(f"Expense / Asset Account: {row.get('expense_asset_account', '')}")
+                    st.write(f"Terms: {row.get('terms', '')}")
+                    st.write(f"Last Modified: {row.get('last_modified', '')}")
+
+                    if not can_modify:
+                        st.info("You have view-only access. Contact an admin to update or delete invoices.")
+                    else:
+                        st.markdown("---")
+                        st.write("**Edit Invoice**")
+
+                        with st.form(f"edit_invoice_form_{iid}"):
+                            # Vendor
+                            vendor_value = row.get("vendor") or ""
+                            if vendor_value in vendor_options:
+                                vendor_index = vendor_options.index(vendor_value)
+                            else:
+                                vendor_index = 0 if vendor_options else 0
+
+                            vendor = st.selectbox(
+                                "Vendor (from CRM)",
+                                vendor_options,
+                                index=vendor_index if vendor_options else 0,
+                                key=f"inv_edit_vendor_{iid}",
+                            )
+
+                            vendor_invoice_number = st.text_input(
+                                "Vendor Invoice Number",
+                                value=row.get("vendor_invoice_number") or "",
+                                key=f"inv_edit_vendor_inv_no_{iid}",
+                            )
+
+                            summary = st.text_area(
+                                "Summary",
+                                value=row.get("summary") or "",
+                                key=f"inv_edit_summary_{iid}",
+                            )
+
+                            vatable_amount = st.number_input(
+                                "Vatable Amount",
+                                min_value=0.0,
+                                step=0.01,
+                                value=float(row.get("vatable_amount") or 0.0),
+                                key=f"inv_edit_vatable_{iid}",
+                            )
+
+                            vat_rate = st.number_input(
+                                "VAT Rate (%)",
+                                min_value=0.0,
+                                step=0.5,
+                                value=float(row.get("vat_rate") or 0.0),
+                                key=f"inv_edit_vat_rate_{iid}",
+                            )
+
+                            wht_rate = st.number_input(
+                                "WHT Rate (%)",
+                                min_value=0.0,
+                                step=0.5,
+                                value=float(row.get("wht_rate") or 0.0),
+                                key=f"inv_edit_wht_rate_{iid}",
+                            )
+
+                            non_vatable_amount = st.number_input(
+                                "Non-vatable Amount",
+                                min_value=0.0,
+                                step=0.01,
+                                value=float(row.get("non_vatable_amount") or 0.0),
+                                key=f"inv_edit_non_vatable_{iid}",
+                            )
+
+                            terms = st.text_area(
+                                "Terms",
+                                value=row.get("terms") or "",
+                                key=f"inv_edit_terms_{iid}",
+                            )
+
+                            currency_value = (row.get("currency") or "NGN").upper()
+                            currency_options = ["NGN", "USD", "GBP", "EUR"]
+                            if currency_value not in currency_options:
+                                currency_options.append(currency_value)
+                            try:
+                                currency_index = currency_options.index(currency_value)
+                            except ValueError:
+                                currency_index = 0
+
+                            currency = st.selectbox(
+                                "Currency",
+                                currency_options,
+                                index=currency_index,
+                                key=f"inv_edit_currency_{iid}",
+                            )
+
+                            # Accounts
+                            payable_value = row.get("payable_account") or ""
+                            if payable_value in payable_options:
+                                payable_index = payable_options.index(payable_value)
+                            else:
+                                payable_index = 0 if payable_options else 0
+
+                            payable_account = st.selectbox(
+                                "Payable Account (Chart of Accounts)",
+                                payable_options,
+                                index=payable_index if payable_options else 0,
+                                key=f"inv_edit_payable_{iid}",
+                            )
+
+                            expense_value = row.get("expense_asset_account") or ""
+                            if expense_value in expense_asset_options:
+                                expense_index = expense_asset_options.index(expense_value)
+                            else:
+                                expense_index = 0 if expense_asset_options else 0
+
+                            expense_asset_account = st.selectbox(
+                                "Expense / Asset Account (Chart of Accounts)",
+                                expense_asset_options,
+                                index=expense_index if expense_asset_options else 0,
+                                key=f"inv_edit_expense_{iid}",
+                            )
+
+                            uploaded_file = st.file_uploader(
+                                "Replace invoice document (optional)",
+                                type=["pdf", "jpg", "png"],
+                                key=f"inv_edit_file_{iid}",
+                            )
+                            file_name = None
+                            file_bytes = None
+                            if uploaded_file is not None:
+                                file_name = uploaded_file.name
+                                file_bytes = uploaded_file.read()
+
+                            save_btn = st.form_submit_button("Save Changes")
+                            if save_btn:
+                                err = update_invoice(
+                                    company_id=company_id,
+                                    invoice_id=iid,
+                                    vendor_invoice_number=vendor_invoice_number,
+                                    vendor=vendor,
+                                    summary=summary,
+                                    vatable_amount=vatable_amount,
+                                    vat_rate=vat_rate,
+                                    wht_rate=wht_rate,
+                                    non_vatable_amount=non_vatable_amount,
+                                    terms=terms,
+                                    payable_account=payable_account,
+                                    expense_asset_account=expense_asset_account,
+                                    currency=currency,
+                                    username=user["username"],
+                                    file_name=file_name,
+                                    file_data=file_bytes,
+                                )
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.success(f"Invoice {iid} updated successfully.")
+                                    st.experimental_rerun()
+
+                        st.markdown("---")
+                        if st.button(
+                            "Delete Invoice",
+                            key=f"inv_delete_{iid}",
+                        ):
+                            # Let same permission set handle delete
+                            if not can_modify:
+                                st.error("You do not have permission to delete invoices.")
+                            else:
+                                err = delete_invoice(
+                                    company_id=company_id,
+                                    invoice_id=iid,
+                                    username=user["username"],
+                                )
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.success(f"Invoice {iid} deleted.")
+                                    st.experimental_rerun()
 
     # CRM / master data overview
     with tab3:
@@ -951,4 +1175,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
