@@ -140,62 +140,63 @@ def app_vouchers():
                         amount_paid = float(row[0] or 0.0)
                         vat_paid = float(row[1] or 0.0)
                         wht_paid = float(row[2] or 0.0)
-        except Exception as e:
-            st.warning(f"Could not compute invoice allocation summary: {e}")
+        except Exception:
+        # For safety, any error here just means we skip the allocation summary
+            amount_paid = 0.0
+            vat_paid = 0.0
+            wht_paid = 0.0
 
         # Balances
         actual_balance = actual_total - amount_paid
         vat_balance = inv_vat_total - vat_paid
         wht_balance = inv_wht_total - wht_paid
 
-        cur_code = invoice_currency or "NGN"
-
+        # 3 columns for summary blocks
         st.markdown("### Invoice Allocation Summary")
-
         c1, c2, c3 = st.columns(3)
 
         # -------- Base amount block --------
         with c1:
-            st.markdown("**Base Amount (Vatable + Non-vatable)**")
-            st.write(f"Invoice Amount: **{actual_total:,.2f} {cur_code}**")
+            st.markdown("**Base Amount (Invoice)**")
+            st.write(f"Invoice base total: **{actual_total:,.2f} {invoice_currency}**")
             st.markdown(
-                "Amount Paid via Vouchers: "
-                f"<span style='color: green; font-weight:bold;'>{amount_paid:,.2f} {cur_code}</span>",
+                "Base paid via vouchers: "
+                f"<span style='color: green; font-weight:bold;'>{amount_paid:,.2f} {invoice_currency}</span>",
                 unsafe_allow_html=True,
             )
             st.markdown(
-                "Balance to Pay: "
-                f"<span style='color: red; font-weight:bold;'>{actual_balance:,.2f} {cur_code}</span>",
+                "Base Balance to Pay: "
+                f"<span style='color: red; font-weight:bold;'>{actual_balance:,.2f} {invoice_currency}</span>",
                 unsafe_allow_html=True,
             )
 
         # -------- VAT block --------
         with c2:
             st.markdown("**VAT Allocation**")
-            st.write(f"Invoice VAT: **{inv_vat_total:,.2f} {cur_code}**")
+            st.write(f"Invoice VAT: **{inv_vat_total:,.2f} {invoice_currency}**")
             st.markdown(
-                "VAT Paid via Vouchers: "
-                f"<span style='color: green; font-weight:bold;'>{vat_paid:,.2f} {cur_code}</span>",
+                "VAT paid via vouchers: "
+                f"<span style='color: green; font-weight:bold;'>{vat_paid:,.2f} {invoice_currency}</span>",
                 unsafe_allow_html=True,
             )
             st.markdown(
                 "VAT Balance: "
-                f"<span style='color: red; font-weight:bold;'>{vat_balance:,.2f} {cur_code}</span>",
+                f"<span style='color: red; font-weight:bold;'>{vat_balance:,.2f} {invoice_currency}</span>",
                 unsafe_allow_html=True,
             )
 
         # -------- WHT block --------
         with c3:
             st.markdown("**WHT Allocation**")
-            st.write(f"Invoice WHT: **{inv_wht_total:,.2f} {cur_code}**")
+            st.write(f"Invoice WHT: **{inv_wht_total:,.2f} {invoice_currency}**")
             st.markdown(
                 "WHT Deducted via Vouchers: "
-                f"<span style='color: green; font-weight:bold;'>{wht_paid:,.2f} {cur_code}</span>",
+                f"<span style='color: green; font-weight:bold;'>{wht_paid:,.2f} {invoice_currency}</span>",
                 unsafe_allow_html=True,
             )
             st.markdown(
                 "WHT Balance: "
-                f"<span style='color: red; font-weight:bold;'>{wht_balance:,.2f} {cur_code}</span>",
+                f"<span style='color: red; font-weight:bold;'>{wht_balance:,.2f} {invoice_currency}</span>",
                 unsafe_allow_html=True,
             )
 
@@ -401,6 +402,41 @@ def app_vouchers():
                         )
                         st.experimental_rerun()
 
+        # ------------- NEW: Delete Voucher -------------
+        st.markdown("---")
+        st.markdown("**Delete Voucher**")
+
+        delete_vid = st.number_input(
+            "Voucher ID to delete",
+            min_value=0,
+            step=1,
+            value=0,
+            key="voucher_id_delete",
+        )
+        confirm_delete = st.checkbox(
+            "Confirm permanent delete of selected voucher",
+            key="confirm_delete_voucher",
+        )
+
+        if st.button("Delete Voucher", key="delete_voucher_button"):
+            if delete_vid <= 0:
+                st.error("Please enter a valid voucher ID to delete.")
+            elif not confirm_delete:
+                st.error("Please tick the confirmation box before deleting.")
+            else:
+                err = delete_voucher(
+                    company_id=company_id,
+                    voucher_id=int(delete_vid),
+                    actor_username=username,
+                )
+                if err:
+                    st.error(err)
+                else:
+                    st.success(f"Voucher {int(delete_vid)} deleted.")
+                    st.experimental_rerun()
+
+        # -------- Export to PDF --------
+        st.markdown("---")
         st.markdown("**Export to PDF**")
         pdf_id = st.number_input(
             "Voucher ID to export",
@@ -425,6 +461,10 @@ def app_vouchers():
                 )
     else:
         st.info("No vouchers yet.")
+
+
+
+
 
 
 # -------------------
@@ -518,8 +558,213 @@ def app_invoices():
                 lambda v: f"{v:,.2f}" if v is not None else ""
             )
         st.dataframe(idf)
+
+        # ------------- NEW: Edit / Delete existing invoices -------------
+
+        st.markdown("---")
+        st.subheader("Edit / Delete Invoice")
+
+        # Build lookup from DataFrame
+        invoice_ids = idf["id"].tolist()
+        id_to_row = {
+            int(row["id"]): row for _, row in idf.iterrows()
+        }
+
+        selected_invoice_id = st.selectbox(
+            "Select Invoice ID",
+            invoice_ids,
+            format_func=lambda iid: f"ID {iid} - {id_to_row[iid]['invoice_number']}",
+            key="invoice_select_for_edit",
+        )
+
+        selected_row = id_to_row[int(selected_invoice_id)]
+
+        action = st.radio(
+            "Action",
+            ["Edit", "Delete"],
+            index=0,
+            horizontal=True,
+            key="invoice_action_choice",
+        )
+
+        if action == "Delete":
+            st.warning(
+                "This will permanently delete the selected invoice. "
+                "Ensure it is not already used in vouchers or reporting."
+            )
+            confirm_delete = st.checkbox(
+                "Confirm permanent delete of this invoice",
+                key="confirm_delete_invoice",
+            )
+            if st.button("Delete Invoice", key="delete_invoice_button"):
+                if not confirm_delete:
+                    st.error("Please tick the confirmation box before deleting.")
+                else:
+                    err = delete_invoice(
+                        company_id=company_id,
+                        invoice_id=int(selected_invoice_id),
+                        username=username,
+                    )
+                    if err:
+                        st.error(err)
+                    else:
+                        st.success(
+                            f"Invoice {selected_row['invoice_number']} (ID {selected_invoice_id}) deleted."
+                        )
+                        st.experimental_rerun()
+
+        else:
+            st.info(
+                "Edit the fields below and click **Update Invoice**. "
+                "Leave the file upload empty to keep the existing attachment."
+            )
+
+            with st.form("edit_invoice_form"):
+                # Pre-fill with current values
+                current_vendor = selected_row.get("vendor") or ""
+                if current_vendor in vendor_options:
+                    vendor_idx = vendor_options.index(current_vendor)
+                else:
+                    vendor_idx = 0
+
+                edit_vendor = st.selectbox(
+                    "Vendor (from CRM)",
+                    vendor_options,
+                    index=vendor_idx,
+                    key="edit_inv_vendor",
+                )
+                edit_vendor_invoice_number = st.text_input(
+                    "Vendor Invoice Number",
+                    value=selected_row.get("vendor_invoice_number") or "",
+                    key="edit_inv_vendor_invoice_number",
+                )
+                edit_summary = st.text_area(
+                    "Summary",
+                    value=selected_row.get("summary") or "",
+                    key="edit_inv_summary",
+                )
+
+                edit_vatable_amount = st.number_input(
+                    "Vatable Amount",
+                    min_value=0.0,
+                    step=0.01,
+                    value=float(selected_row.get("vatable_amount") or 0.0),
+                    key="edit_inv_vatable_amount",
+                )
+                edit_vat_rate = st.number_input(
+                    "VAT Rate (%)",
+                    min_value=0.0,
+                    step=0.5,
+                    value=float(selected_row.get("vat_rate") or 0.0),
+                    key="edit_inv_vat_rate",
+                )
+                edit_wht_rate = st.number_input(
+                    "WHT Rate (%)",
+                    min_value=0.0,
+                    step=0.5,
+                    value=float(selected_row.get("wht_rate") or 0.0),
+                    key="edit_inv_wht_rate",
+                )
+                edit_non_vatable_amount = st.number_input(
+                    "Non-vatable Amount",
+                    min_value=0.0,
+                    step=0.01,
+                    value=float(selected_row.get("non_vatable_amount") or 0.0),
+                    key="edit_inv_non_vatable_amount",
+                )
+
+                edit_terms = st.text_area(
+                    "Terms",
+                    value=selected_row.get("terms") or "",
+                    key="edit_inv_terms",
+                )
+
+                current_currency = (selected_row.get("currency") or "NGN").upper()
+                currency_options = ["NGN", "USD", "GBP", "EUR"]
+                if current_currency not in currency_options:
+                    currency_options.append(current_currency)
+                try:
+                    curr_idx = currency_options.index(current_currency)
+                except ValueError:
+                    curr_idx = 0
+
+                edit_currency = st.selectbox(
+                    "Currency",
+                    currency_options,
+                    index=curr_idx,
+                    key="edit_inv_currency",
+                )
+
+                current_payable = selected_row.get("payable_account") or ""
+                if current_payable in payable_options:
+                    payable_idx = payable_options.index(current_payable)
+                else:
+                    payable_idx = 0
+
+                edit_payable_account = st.selectbox(
+                    "Payable Account (Chart of Accounts)",
+                    payable_options,
+                    index=payable_idx,
+                    key="edit_inv_payable_account",
+                )
+
+                current_expense = selected_row.get("expense_asset_account") or ""
+                if current_expense in expense_asset_options:
+                    expense_idx = expense_asset_options.index(current_expense)
+                else:
+                    expense_idx = 0
+
+                edit_expense_asset_account = st.selectbox(
+                    "Expense / Asset Account (Chart of Accounts)",
+                    expense_asset_options,
+                    index=expense_idx,
+                    key="edit_inv_expense_asset_account",
+                )
+
+                st.markdown("**Replace Invoice Document (optional)**")
+                edit_uploaded = st.file_uploader(
+                    "Upload new invoice document to replace existing (leave empty to keep current)",
+                    type=["pdf", "jpg", "png"],
+                    key="edit_inv_file",
+                )
+                edit_file_name = None
+                edit_file_bytes = None
+                if edit_uploaded is not None:
+                    edit_file_name = edit_uploaded.name
+                    edit_file_bytes = edit_uploaded.read()
+
+                submitted_edit = st.form_submit_button("Update Invoice")
+
+            if submitted_edit:
+                err = update_invoice(
+                    company_id=company_id,
+                    invoice_id=int(selected_invoice_id),
+                    vendor_invoice_number=edit_vendor_invoice_number,
+                    vendor=edit_vendor,
+                    summary=edit_summary,
+                    vatable_amount=edit_vatable_amount,
+                    vat_rate=edit_vat_rate,
+                    wht_rate=edit_wht_rate,
+                    non_vatable_amount=edit_non_vatable_amount,
+                    terms=edit_terms,
+                    payable_account=edit_payable_account,
+                    expense_asset_account=edit_expense_asset_account,
+                    currency=edit_currency,
+                    username=username,
+                    file_name=edit_file_name,
+                    file_data=edit_file_bytes,
+                )
+                if err:
+                    st.error(err)
+                else:
+                    st.success(
+                        f"Invoice {selected_row['invoice_number']} (ID {selected_invoice_id}) updated."
+                    )
+                    st.experimental_rerun()
     else:
         st.info("No invoices yet.")
+
+
 
 
 # -------------------
