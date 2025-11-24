@@ -1,11 +1,10 @@
 # app_main.py
-# Streamlit entrypoint for finance app: vouchers + invoices.
+# Streamlit entrypoint for finance app: vouchers + invoices (with inline edit/delete in reporting).
 
 import streamlit as st
 import pandas as pd
 
 from db_config import connect
-from auth import current_user, require_permission
 from crm_gateway import (
     get_vendor_name_list,
     get_requester_options,
@@ -28,6 +27,29 @@ from invoices_module import (
     delete_invoice,
 )
 from pdf_utils import build_voucher_pdf_bytes
+
+
+# -------------------------------------------------------------------
+# SIMPLE AUTH STUBS (because there is no auth.py in your project)
+# -------------------------------------------------------------------
+
+def current_user():
+    """
+    Very simple placeholder user.
+    Replace this with real authentication later if needed.
+    """
+    return {
+        "username": "admin",
+        "company_id": 1,
+    }
+
+
+def require_permission(permission_name: str):
+    """
+    Placeholder permission check that does nothing for now.
+    If you later implement auth/roles, add checks here.
+    """
+    return
 
 
 # -------------------
@@ -338,7 +360,7 @@ def app_vouchers():
             st.markdown("---")
             st.markdown("### Update status / Edit / Delete")
 
-            # Status update for this voucher only (replaces global apply-action)
+            # Status update for this voucher only (per row)
             col_s1, col_s2 = st.columns([2, 1])
             with col_s1:
                 action = st.selectbox(
@@ -841,8 +863,13 @@ def app_invoices():
 
 def main():
     st.set_page_config(page_title="Finance App", layout="wide")
-    init_voucher_schema()
-    user = current_user()
+
+    # ensure voucher tables exist
+    try:
+        init_voucher_schema()
+    except Exception:
+        # if schema init fails, still let the app try to run
+        pass
 
     st.sidebar.title("Navigation")
     page = st.sidebar.radio(
