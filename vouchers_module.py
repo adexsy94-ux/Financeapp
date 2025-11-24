@@ -1,6 +1,6 @@
 """
 vouchers_module.py
-Updated voucher module with manual voucher number support and simple reporting-friendly helpers.
+Updated voucher module with manual voucher number support and reporting-friendly helpers.
 """
 
 from __future__ import annotations
