@@ -1,268 +1,140 @@
-"""
-vouchers_module.py
-Updated voucher module with manual voucher number support and reporting-friendly helpers.
-"""
-
-from __future__ import annotations
+# vouchers_module.py
+# Multi-tenant vouchers: numbering, lines, CRM linking, status changes.
 
 from contextlib import closing
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import List, Dict, Optional, Tuple
 
-import psycopg2
+from db_config import (
+    connect,
+    VOUCHER_TABLE_SQL,
+    VOUCHER_LINES_TABLE_SQL,
+    VOUCHER_DOCS_TABLE_SQL,
+    log_action,
+)
+from crm_gateway import get_vendor_name_list, get_requester_options
 
-from db_config import connect
-from auth_module import log_action
+
+# ------------------------
+# Schema init
+# ------------------------
+
+def init_voucher_schema() -> None:
+    """Ensure voucher tables exist."""
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(VOUCHER_TABLE_SQL)
+        cur.execute(VOUCHER_LINES_TABLE_SQL)
+        cur.execute(VOUCHER_DOCS_TABLE_SQL)
+        conn.commit()
 
 
-# ---------------------------------------------------------------------
+# ------------------------
 # Helpers
-# ---------------------------------------------------------------------
+# ------------------------
 
-def _now_ts() -> str:
-    """Return current UTC timestamp in ISO format suitable for DB."""
-    return datetime.utcnow().isoformat(timespec="seconds")
+def _now_ts() -> datetime:
+    return datetime.utcnow()
 
 
 def generate_voucher_number(company_id: int) -> str:
     """
-    Generate a new voucher number like VCH-2025-0001 for the given company.
-    Assumes there is a vouchers table with company_id and voucher_number.
+    Simple timestamp-based voucher number, unique per company.
     """
-    year = datetime.utcnow().year
-    prefix = f"VCH-{year}-"
-
-    with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT voucher_number
-            FROM vouchers
-            WHERE company_id = %s
-              AND voucher_number LIKE %s
-            ORDER BY voucher_number DESC
-            LIMIT 1
-            """,
-            (company_id, prefix + "%"),
-        )
-        row = cur.fetchone()
-
-        if not row or not row[0]:
-            next_seq = 1
-        else:
-            last_num = row[0]
-            try:
-                seq_part = last_num.split("-")[-1]
-                next_seq = int(seq_part) + 1
-            except Exception:
-                next_seq = 1
-
-    return f"{prefix}{next_seq:04d}"
+    now = datetime.utcnow()
+    return now.strftime("VCH-%Y%m%d%H%M%S")
 
 
-# ---------------------------------------------------------------------
-# Schema initialisation (optional – safe to call multiple times)
-# ---------------------------------------------------------------------
-
-def init_voucher_schema() -> None:
-    """
-    Ensures the vouchers and voucher_lines tables exist.
-    This is conservative: if the tables already exist, nothing breaks.
-    """
-    ddl_vouchers = """
-    CREATE TABLE IF NOT EXISTS vouchers (
-        id SERIAL PRIMARY KEY,
-        company_id INTEGER NOT NULL,
-        parent_id INTEGER NULL,
-        version INTEGER NOT NULL DEFAULT 1,
-        voucher_number TEXT NOT NULL,
-        vendor TEXT NOT NULL,
-        requester TEXT NOT NULL,
-        invoice_ref TEXT,
-        currency TEXT NOT NULL DEFAULT 'NGN',
-        status TEXT NOT NULL DEFAULT 'draft',
-        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
-        last_modified TIMESTAMP WITHOUT TIME ZONE NOT NULL,
-        approved_by TEXT NULL,
-        approved_at TIMESTAMP WITHOUT TIME ZONE NULL,
-        file_name TEXT NULL,
-        file_data BYTEA NULL
-    );
-    """
-
-    ddl_voucher_lines = """
-    CREATE TABLE IF NOT EXISTS voucher_lines (
-        id SERIAL PRIMARY KEY,
-        company_id INTEGER NOT NULL,
-        voucher_id INTEGER NOT NULL REFERENCES vouchers(id) ON DELETE CASCADE,
-        line_no INTEGER NOT NULL,
-        description TEXT NOT NULL,
-        account_name TEXT NOT NULL,
-        amount NUMERIC(18, 2) NOT NULL DEFAULT 0,
-        vat_percent NUMERIC(5, 2) NOT NULL DEFAULT 0,
-        wht_percent NUMERIC(5, 2) NOT NULL DEFAULT 0,
-        vat_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
-        wht_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
-        total NUMERIC(18, 2) NOT NULL DEFAULT 0
-    );
-    """
-
-    with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        cur.execute(ddl_vouchers)
-        cur.execute(ddl_voucher_lines)
-        conn.commit()
-
-
-# ---------------------------------------------------------------------
-# Core CRUD helpers
-# ---------------------------------------------------------------------
-
-def list_vouchers(company_id: int) -> List[Dict[str, Any]]:
-    """
-    Return all vouchers for a company as a list of dicts.
-    """
-    with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT
-                id,
-                company_id,
-                parent_id,
-                version,
-                voucher_number,
-                vendor,
-                requester,
-                invoice_ref,
-                currency,
-                status,
-                created_at,
-                last_modified,
-                approved_by,
-                approved_at,
-                file_name
-            FROM vouchers
-            WHERE company_id = %s
-            ORDER BY id DESC
-            """,
-            (company_id,),
-        )
-        rows = cur.fetchall()
-        colnames = [c.name for c in cur.description]
-
-    results: List[Dict[str, Any]] = []
-    for row in rows:
-        results.append({colnames[i]: row[i] for i in range(len(colnames))})
-    return results
-
-
-def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict[str, Any]]:
-    """
-    Return all voucher_lines for a voucher as a list of dicts.
-    """
-    with closing(connect()) as conn, closing(conn.cursor()) as cur:
-        cur.execute(
-            """
-            SELECT
-                id,
-                company_id,
-                voucher_id,
-                line_no,
-                description,
-                account_name,
-                amount,
-                vat_percent,
-                wht_percent,
-                vat_value,
-                wht_value,
-                total
-            FROM voucher_lines
-            WHERE company_id = %s
-              AND voucher_id = %s
-            ORDER BY line_no
-            """,
-            (company_id, voucher_id),
-        )
-        rows = cur.fetchall()
-        colnames = [c.name for c in cur.description]
-
-    results: List[Dict[str, Any]] = []
-    for row in rows:
-        results.append({colnames[i]: row[i] for i in range(len(colnames))})
-    return results
-
+# ------------------------
+# Create
+# ------------------------
 
 def create_voucher(
     company_id: int,
+    username: str,
     vendor: str,
     requester: str,
     invoice_ref: str,
     currency: str,
-    username: str,
-    lines: List[Dict[str, Any]],
-    file_name: Optional[str] = None,
-    file_bytes: Optional[bytes] = None,
-    voucher_number: Optional[str] = None,
+    lines: List[Dict],
+    file_name: Optional[str],
+    file_bytes: Optional[bytes],
 ) -> Optional[str]:
     """
-    Create a new voucher with optional manual voucher_number.
-    If voucher_number is None or blank, a new one is generated.
-    Ensures voucher_number is unique per company.
-    Returns None on success, or an error message on failure.
+    Create a new voucher with line items and optional attachment.
+
+    Returns:
+        None on success, or an error message string.
     """
+    vendor = (vendor or "").strip()
+    requester = (requester or "").strip()
+    invoice_ref = (invoice_ref or "").strip()
+    currency = (currency or "").strip() or "NGN"
 
     if not vendor:
         return "Vendor is required."
     if not requester:
         return "Requester is required."
-    if not currency:
-        currency = "NGN"
+
+    # Validate vendor exists in CRM
+    vendor_list = get_vendor_name_list(company_id)
+    if vendor not in vendor_list:
+        return f"Vendor '{vendor}' not found in CRM. Please create it first in the CRM tab."
+
+    # Validate requester exists in staff options (soft check)
+    requester_opts = get_requester_options(company_id)
+    if requester not in requester_opts:
+        # Not fatal, allow free text
+        pass
+
     if not lines:
-        return "Voucher must have at least one line."
+        return "At least one voucher line is required."
 
-    # Validate that at least one line has a positive total
-    positive_exists = False
-    for ln in lines:
-        try:
-            total_val = float(ln.get("total") or 0.0)
-        except Exception:
-            total_val = 0.0
-        if total_val > 0:
-            positive_exists = True
-            break
+    # Normalize / validate lines
+    valid_lines: List[Dict] = []
+    for idx, ln in enumerate(lines):
+        desc = (ln.get("description") or "").strip()
+        account_name = (ln.get("account_name") or "").strip()
+        amount = float(ln.get("amount") or 0.0)
+        vat_percent = float(ln.get("vat_percent") or 0.0)
+        wht_percent = float(ln.get("wht_percent") or 0.0)
 
-    if not positive_exists:
-        return "At least one line must have a positive payable amount."
+        # Ignore completely empty rows
+        if not desc and amount == 0:
+            continue
 
-    # Determine / normalise voucher number
-    vnum = (voucher_number or "").strip().upper()
-    if not vnum:
-        vnum = generate_voucher_number(company_id)
+        if not desc:
+            return f"Description is required for line {idx + 1}."
+        if amount <= 0:
+            return f"Amount must be > 0 for line {idx + 1}."
+        if not account_name:
+            return f"Account (Chart of Accounts) is required for line {idx + 1}."
 
-    # Compute total payable (for logging only)
-    total_payable = 0.0
-    for ln in lines:
-        try:
-            total_payable += float(ln.get("total") or 0.0)
-        except Exception:
-            pass
+        vat_value = round(amount * vat_percent / 100.0, 2)
+        wht_value = round(amount * wht_percent / 100.0, 2)
+        total = amount + vat_value - wht_value
 
-    now_ts = _now_ts()
+        valid_lines.append(
+            {
+                "description": desc,
+                "account_name": account_name,
+                "amount": amount,
+                "vat_percent": vat_percent,
+                "wht_percent": wht_percent,
+                "vat_value": vat_value,
+                "wht_value": wht_value,
+                "total": total,
+            }
+        )
+
+    if not valid_lines:
+        return "No valid voucher lines found."
+
+    voucher_number = generate_voucher_number(company_id)
+    ts = _now_ts()
 
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
-            # Check uniqueness of voucher_number within this company
-            cur.execute(
-                """
-                SELECT 1
-                FROM vouchers
-                WHERE company_id = %s
-                  AND voucher_number = %s
-                """,
-                (company_id, vnum),
-            )
-            if cur.fetchone():
-                return f"Voucher number '{vnum}' already exists. Please choose another number."
-
-            # Insert header
+            # Insert voucher header
             cur.execute(
                 """
                 INSERT INTO vouchers (
@@ -278,65 +150,39 @@ def create_voucher(
                     created_at,
                     last_modified,
                     approved_by,
-                    approved_at,
-                    file_name,
-                    file_data
-                )
-                VALUES (
+                    approved_at
+                ) VALUES (
                     %s, NULL, 1,
                     %s,
                     %s,
                     %s,
                     %s,
                     %s,
-                    'draft',
+                    %s,
                     %s,
                     %s,
                     NULL,
-                    NULL,
-                    %s,
-                    %s
+                    NULL
                 )
                 RETURNING id
                 """,
                 (
                     company_id,
-                    vnum,
+                    voucher_number,
                     vendor,
                     requester,
-                    invoice_ref or "",
+                    invoice_ref or None,
                     currency,
-                    now_ts,
-                    now_ts,
-                    file_name,
-                    psycopg2.Binary(file_bytes) if file_bytes else None,
+                    "draft",
+                    ts,
+                    ts,
                 ),
             )
-            voucher_id = cur.fetchone()[0]
+            (voucher_id,) = cur.fetchone()
 
             # Insert lines
             line_no = 1
-            for ln in lines:
-                desc = (ln.get("description") or "").strip()
-                acct_name = (ln.get("account_name") or "").strip()
-
-                try:
-                    amt = float(ln.get("amount") or 0.0)
-                except Exception:
-                    amt = 0.0
-                try:
-                    vat_percent = float(ln.get("vat_percent") or 0.0)
-                except Exception:
-                    vat_percent = 0.0
-                try:
-                    wht_percent = float(ln.get("wht_percent") or 0.0)
-                except Exception:
-                    wht_percent = 0.0
-
-                vat_val = amt * vat_percent / 100.0
-                wht_val = amt * wht_percent / 100.0
-                total_val = amt + vat_val - wht_val
-
+            for ln in valid_lines:
                 cur.execute(
                     """
                     INSERT INTO voucher_lines (
@@ -351,18 +197,13 @@ def create_voucher(
                         vat_value,
                         wht_value,
                         total
-                    )
-                    VALUES (
+                    ) VALUES (
+                        %s, %s,
                         %s,
+                        %s, %s,
                         %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
+                        %s, %s,
+                        %s, %s,
                         %s
                     )
                     """,
@@ -370,272 +211,173 @@ def create_voucher(
                         company_id,
                         voucher_id,
                         line_no,
-                        desc,
-                        acct_name,
-                        amt,
-                        vat_percent,
-                        wht_percent,
-                        vat_val,
-                        wht_val,
-                        total_val,
+                        ln["description"],
+                        ln["account_name"],
+                        ln["amount"],
+                        ln["vat_percent"],
+                        ln["wht_percent"],
+                        ln["vat_value"],
+                        ln["wht_value"],
+                        ln["total"],
                     ),
                 )
                 line_no += 1
 
-            # Audit
-            log_action(
-                conn=conn,
-                company_id=company_id,
-                username=username,
-                action="CREATE",
-                entity="voucher",
-                ref=vnum,
-                details=f"Created voucher with total payable {total_payable:.2f}",
-            )
+            # Optional attachment
+            if file_name and file_bytes:
+                cur.execute(
+                    """
+                    INSERT INTO voucher_documents (
+                        company_id,
+                        voucher_id,
+                        file_name,
+                        file_data,
+                        uploaded_at
+                    ) VALUES (
+                        %s, %s,
+                        %s, %s,
+                        %s
+                    )
+                    """,
+                    (
+                        company_id,
+                        voucher_id,
+                        file_name,
+                        file_bytes,
+                        ts,
+                    ),
+                )
 
             conn.commit()
-        return None
-    except Exception as e:
-        return f"Error creating voucher: {e}"
 
+        log_action(
+            username,
+            "create_voucher",
+            "vouchers",
+            ref=voucher_number,
+            company_id=company_id,
+        )
+        return None
+    except Exception as ex:
+        return f"Error creating voucher: {ex}"
+
+
+# ------------------------
+# Update
+# ------------------------
 
 def update_voucher(
     company_id: int,
     voucher_id: int,
     username: str,
-    vendor: Optional[str] = None,
-    requester: Optional[str] = None,
-    invoice_ref: Optional[str] = None,
-    currency: Optional[str] = None,
-    status: Optional[str] = None,
-    lines: Optional[List[Dict[str, Any]]] = None,
+    vendor: str,
+    requester: str,
+    invoice_ref: str,
+    currency: str,
+    lines: List[Dict],
 ) -> Optional[str]:
     """
-    Update header + (optionally) lines for an existing voucher.
-    Lines are replaced if a non-empty list is passed.
+    Update an existing voucher (header + lines).
+
+    - Keeps the same voucher_number, created_at and attachments.
+    - Replaces all voucher_lines with the new list.
     """
-    now_ts = _now_ts()
+    vendor = (vendor or "").strip()
+    requester = (requester or "").strip()
+    invoice_ref = (invoice_ref or "").strip()
+    currency = (currency or "").strip() or "NGN"
+
+    if not vendor:
+        return "Vendor is required."
+    if not requester:
+        return "Requester is required."
+
+    # Validate vendor exists in CRM
+    vendor_list = get_vendor_name_list(company_id)
+    if vendor not in vendor_list:
+        return f"Vendor '{vendor}' not found in CRM. Please create it first in the CRM tab."
+
+    # Validate requester exists in staff options (soft check)
+    requester_opts = get_requester_options(company_id)
+    if requester not in requester_opts:
+        # Not fatal, allow free text
+        pass
+
+    if not lines:
+        return "At least one voucher line is required."
+
+    # Normalize / validate lines
+    valid_lines: List[Dict] = []
+    for idx, ln in enumerate(lines):
+        desc = (ln.get("description") or "").strip()
+        account_name = (ln.get("account_name") or "").strip()
+        amount = float(ln.get("amount") or 0.0)
+        vat_percent = float(ln.get("vat_percent") or 0.0)
+        wht_percent = float(ln.get("wht_percent") or 0.0)
+
+        # Ignore completely empty rows
+        if not desc and amount == 0:
+            continue
+
+        if not desc:
+            return f"Description is required for line {idx + 1}."
+        if amount <= 0:
+            return f"Amount must be > 0 for line {idx + 1}."
+        if not account_name:
+            return f"Account (Chart of Accounts) is required for line {idx + 1}."
+
+        vat_value = round(amount * vat_percent / 100.0, 2)
+        wht_value = round(amount * wht_percent / 100.0, 2)
+        total = amount + vat_value - wht_value
+
+        valid_lines.append(
+            {
+                "description": desc,
+                "account_name": account_name,
+                "amount": amount,
+                "vat_percent": vat_percent,
+                "wht_percent": wht_percent,
+                "vat_value": vat_value,
+                "wht_value": wht_value,
+                "total": total,
+            }
+        )
+
+    if not valid_lines:
+        return "No valid voucher lines found."
+
+    ts = _now_ts()
 
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
             # Update header
-            fields = []
-            params: List[Any] = []
-
-            if vendor is not None:
-                fields.append("vendor = %s")
-                params.append(vendor)
-            if requester is not None:
-                fields.append("requester = %s")
-                params.append(requester)
-            if invoice_ref is not None:
-                fields.append("invoice_ref = %s")
-                params.append(invoice_ref)
-            if currency is not None:
-                fields.append("currency = %s")
-                params.append(currency)
-            if status is not None:
-                fields.append("status = %s")
-                params.append(status)
-
-            fields.append("last_modified = %s")
-            params.append(now_ts)
-
-            if fields:
-                set_sql = ", ".join(fields)
-                params.extend([company_id, voucher_id])
-                cur.execute(
-                    f"""
-                    UPDATE vouchers
-                    SET {set_sql}
-                    WHERE company_id = %s
-                      AND id = %s
-                    """,
-                    params,
-                )
-
-            # Replace lines if provided
-            if lines is not None:
-                cur.execute(
-                    """
-                    DELETE FROM voucher_lines
-                    WHERE company_id = %s
-                      AND voucher_id = %s
-                    """,
-                    (company_id, voucher_id),
-                )
-
-                line_no = 1
-                for ln in lines:
-                    desc = (ln.get("description") or "").strip()
-                    acct_name = (ln.get("account_name") or "").strip()
-
-                    try:
-                        amt = float(ln.get("amount") or 0.0)
-                    except Exception:
-                        amt = 0.0
-                    try:
-                        vat_percent = float(ln.get("vat_percent") or 0.0)
-                    except Exception:
-                        vat_percent = 0.0
-                    try:
-                        wht_percent = float(ln.get("wht_percent") or 0.0)
-                    except Exception:
-                        wht_percent = 0.0
-
-                    vat_val = amt * vat_percent / 100.0
-                    wht_val = amt * wht_percent / 100.0
-                    total_val = amt + vat_val - wht_val
-
-                    cur.execute(
-                        """
-                        INSERT INTO voucher_lines (
-                            company_id,
-                            voucher_id,
-                            line_no,
-                            description,
-                            account_name,
-                            amount,
-                            vat_percent,
-                            wht_percent,
-                            vat_value,
-                            wht_value,
-                            total
-                        )
-                        VALUES (
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s
-                        )
-                        """,
-                        (
-                            company_id,
-                            voucher_id,
-                            line_no,
-                            desc,
-                            acct_name,
-                            amt,
-                            vat_percent,
-                            wht_percent,
-                            vat_val,
-                            wht_val,
-                            total_val,
-                        ),
-                    )
-                    line_no += 1
-
-            # Fetch voucher_number for logging
-            cur.execute(
-                """
-                SELECT voucher_number
-                FROM vouchers
-                WHERE company_id = %s
-                  AND id = %s
-                """,
-                (company_id, voucher_id),
-            )
-            row = cur.fetchone()
-            vnum = row[0] if row else f"ID {voucher_id}"
-
-            log_action(
-                conn=conn,
-                company_id=company_id,
-                username=username,
-                action="UPDATE",
-                entity="voucher",
-                ref=vnum,
-                details="Updated voucher header/lines",
-            )
-
-            conn.commit()
-        return None
-    except Exception as e:
-        return f"Error updating voucher: {e}"
-
-
-def change_voucher_status(
-    company_id: int,
-    voucher_id: int,
-    new_status: str,
-    username: str,
-) -> Optional[str]:
-    """
-    Change the status of a voucher (e.g. draft -> approved / void).
-    """
-    now_ts = _now_ts()
-    try:
-        with closing(connect()) as conn, closing(conn.cursor()) as cur:
             cur.execute(
                 """
                 UPDATE vouchers
-                SET status = %s,
+                SET vendor       = %s,
+                    requester    = %s,
+                    invoice_ref  = %s,
+                    currency     = %s,
                     last_modified = %s
                 WHERE company_id = %s
-                  AND id = %s
+                  AND id         = %s
                 """,
-                (new_status, now_ts, company_id, voucher_id),
+                (
+                    vendor,
+                    requester,
+                    invoice_ref or None,
+                    currency,
+                    ts,
+                    company_id,
+                    voucher_id,
+                ),
             )
 
-            cur.execute(
-                """
-                SELECT voucher_number
-                FROM vouchers
-                WHERE company_id = %s
-                  AND id = %s
-                """,
-                (company_id, voucher_id),
-            )
-            row = cur.fetchone()
-            vnum = row[0] if row else f"ID {voucher_id}"
+            if cur.rowcount == 0:
+                conn.rollback()
+                return f"Voucher {voucher_id} not found for this company."
 
-            log_action(
-                conn=conn,
-                company_id=company_id,
-                username=username,
-                action="STATUS",
-                entity="voucher",
-                ref=vnum,
-                details=f"Changed status to {new_status}",
-            )
-
-            conn.commit()
-        return None
-    except Exception as e:
-        return f"Error updating voucher status: {e}"
-
-
-def delete_voucher(
-    company_id: int,
-    voucher_id: int,
-    username: str,
-) -> Optional[str]:
-    """
-    Hard-delete a voucher and its lines.
-    """
-    try:
-        with closing(connect()) as conn, closing(conn.cursor()) as cur:
-            # Get voucher number for audit before delete
-            cur.execute(
-                """
-                SELECT voucher_number
-                FROM vouchers
-                WHERE company_id = %s
-                  AND id = %s
-                """,
-                (company_id, voucher_id),
-            )
-            row = cur.fetchone()
-            vnum = row[0] if row else f"ID {voucher_id}"
-
-            # Delete lines then header
+            # Replace all lines
             cur.execute(
                 """
                 DELETE FROM voucher_lines
@@ -644,26 +386,355 @@ def delete_voucher(
                 """,
                 (company_id, voucher_id),
             )
+
+            line_no = 1
+            for ln in valid_lines:
+                cur.execute(
+                    """
+                    INSERT INTO voucher_lines (
+                        company_id,
+                        voucher_id,
+                        line_no,
+                        description,
+                        account_name,
+                        amount,
+                        vat_percent,
+                        wht_percent,
+                        vat_value,
+                        wht_value,
+                        total
+                    ) VALUES (
+                        %s, %s,
+                        %s,
+                        %s, %s,
+                        %s,
+                        %s, %s,
+                        %s, %s,
+                        %s
+                    )
+                    """,
+                    (
+                        company_id,
+                        voucher_id,
+                        line_no,
+                        ln["description"],
+                        ln["account_name"],
+                        ln["amount"],
+                        ln["vat_percent"],
+                        ln["wht_percent"],
+                        ln["vat_value"],
+                        ln["wht_value"],
+                        ln["total"],
+                    ),
+                )
+                line_no += 1
+
+            conn.commit()
+
+        log_action(
+            username,
+            "update_voucher",
+            "vouchers",
+            ref=str(voucher_id),
+            company_id=company_id,
+        )
+        return None
+    except Exception as ex:
+        return f"Error updating voucher: {ex}"
+
+
+# ------------------------
+# Status change / delete
+# ------------------------
+
+def change_voucher_status(
+    company_id: int,
+    voucher_id: int,
+    new_status: str,
+    actor_username: str,
+) -> Optional[str]:
+    """
+    Change the status of a voucher (draft / submitted / approved / rejected).
+    """
+    new_status = (new_status or "").strip().lower()
+    if new_status not in {"draft", "submitted", "approved", "rejected"}:
+        return f"Invalid status '{new_status}'."
+
+    ts = _now_ts()
+    try:
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            if new_status in ("approved", "rejected"):
+                cur.execute(
+                    """
+                    UPDATE vouchers
+                    SET status      = %s,
+                        approved_by = %s,
+                        approved_at = %s,
+                        last_modified = %s
+                    WHERE id = %s
+                      AND company_id = %s
+                    """,
+                    (new_status, actor_username, ts, ts, voucher_id, company_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE vouchers
+                    SET status = %s,
+                        last_modified = %s
+                    WHERE id = %s
+                      AND company_id = %s
+                    """,
+                    (new_status, ts, voucher_id, company_id),
+                )
+            conn.commit()
+
+        log_action(
+            actor_username,
+            f"voucher_status_{new_status}",
+            "vouchers",
+            ref=str(voucher_id),
+            company_id=company_id,
+        )
+        return None
+    except Exception as ex:
+        return f"Error changing voucher status: {ex}"
+
+
+def delete_voucher(
+    company_id: int,
+    voucher_id: int,
+    actor_username: str,
+) -> Optional[str]:
+    """
+    Hard-delete a voucher for this company.
+    Assuming ON DELETE CASCADE is set up for voucher_lines and voucher_documents.
+    """
+    try:
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
             cur.execute(
                 """
                 DELETE FROM vouchers
                 WHERE company_id = %s
-                  AND id = %s
+                  AND id         = %s
                 """,
                 (company_id, voucher_id),
             )
-
-            log_action(
-                conn=conn,
-                company_id=company_id,
-                username=username,
-                action="DELETE",
-                entity="voucher",
-                ref=vnum,
-                details="Deleted voucher and all lines",
-            )
-
             conn.commit()
+
+        log_action(
+            actor_username,
+            "voucher_delete",
+            "vouchers",
+            ref=str(voucher_id),
+            company_id=company_id,
+        )
         return None
-    except Exception as e:
-        return f"Error deleting voucher: {e}"
+    except Exception as ex:
+        return f"Error deleting voucher: {ex}"
+
+
+# ------------------------
+# Queries
+# ------------------------
+
+def list_vouchers(company_id: int) -> List[Dict]:
+    """
+    List all vouchers for a company (header only).
+    """
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                parent_id,
+                version,
+                voucher_number,
+                vendor,
+                requester,
+                invoice_ref,
+                currency,
+                status,
+                created_at,
+                last_modified,
+                approved_by,
+                approved_at
+            FROM vouchers
+            WHERE company_id = %s
+            ORDER BY last_modified DESC NULLS LAST, id DESC
+            """,
+            (company_id,),
+        )
+        rows = cur.fetchall()
+
+    result: List[Dict] = []
+    for r in rows:
+        (
+            vid,
+            parent_id,
+            version,
+            voucher_number,
+            vendor,
+            requester,
+            invoice_ref,
+            currency,
+            status,
+            created_at,
+            last_modified,
+            approved_by,
+            approved_at,
+        ) = r
+        result.append(
+            {
+                "id": vid,
+                "parent_id": parent_id,
+                "version": version,
+                "voucher_number": voucher_number,
+                "vendor": vendor,
+                "requester": requester,
+                "invoice_ref": invoice_ref,
+                "currency": currency,
+                "status": status,
+                "created_at": created_at,
+                "last_modified": last_modified,
+                "approved_by": approved_by,
+                "approved_at": approved_at,
+            }
+        )
+    return result
+
+
+def get_voucher(company_id: int, voucher_id: int) -> Dict:
+    """
+    Fetch a single voucher header.
+    """
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                parent_id,
+                version,
+                voucher_number,
+                vendor,
+                requester,
+                invoice_ref,
+                currency,
+                status,
+                created_at,
+                last_modified,
+                approved_by,
+                approved_at
+            FROM vouchers
+            WHERE company_id = %s
+              AND id         = %s
+            """,
+            (company_id, voucher_id),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        raise ValueError(f"Voucher {voucher_id} not found for company {company_id}.")
+
+    (
+        vid,
+        parent_id,
+        version,
+        voucher_number,
+        vendor,
+        requester,
+        invoice_ref,
+        currency,
+        status,
+        created_at,
+        last_modified,
+        approved_by,
+        approved_at,
+    ) = row
+
+    return {
+        "id": vid,
+        "parent_id": parent_id,
+        "version": version,
+        "voucher_number": voucher_number,
+        "vendor": vendor,
+        "requester": requester,
+        "invoice_ref": invoice_ref,
+        "currency": currency,
+        "status": status,
+        "created_at": created_at,
+        "last_modified": last_modified,
+        "approved_by": approved_by,
+        "approved_at": approved_at,
+    }
+
+
+def list_voucher_lines(company_id: int, voucher_id: int) -> List[Dict]:
+    """
+    Fetch all lines for a voucher.
+    """
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """
+            SELECT
+                id,
+                line_no,
+                description,
+                account_name,
+                amount,
+                vat_percent,
+                wht_percent,
+                vat_value,
+                wht_value,
+                total
+            FROM voucher_lines
+            WHERE company_id = %s
+              AND voucher_id = %s
+            ORDER BY line_no, id
+            """,
+            (company_id, voucher_id),
+        )
+        rows = cur.fetchall()
+
+    result: List[Dict] = []
+    for r in rows:
+        (
+            lid,
+            line_no,
+            description,
+            account_name,
+            amount,
+            vat_percent,
+            wht_percent,
+            vat_value,
+            wht_value,
+            total,
+        ) = r
+        result.append(
+            {
+                "id": lid,
+                "line_no": line_no,
+                "description": description,
+                "account_name": account_name,
+                "amount": amount,
+                "vat_percent": vat_percent,
+                "wht_percent": wht_percent,
+                "vat_value": vat_value,
+                "wht_value": wht_value,
+                "total": total,
+            }
+        )
+    return result
+
+
+def get_voucher_with_lines(
+    company_id: int,
+    voucher_id: int,
+) -> Tuple[Dict, List[Dict]]:
+    """
+    Convenience helper used by pdf_utils:
+    returns (voucher_header_dict, list_of_line_dicts).
+    """
+    header = get_voucher(company_id, voucher_id)
+    lines = list_voucher_lines(company_id, voucher_id)
+    return header, lines
