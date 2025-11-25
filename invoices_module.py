@@ -32,6 +32,7 @@ def _now_ts() -> datetime:
     return datetime.utcnow()
 
 
+
 def compute_invoice_totals(
     vatable_amount: float,
     non_vatable_amount: float,
@@ -40,6 +41,10 @@ def compute_invoice_totals(
 ) -> Dict[str, float]:
     """
     Compute VAT, WHT, subtotal and total based on base amounts and rates.
+
+    Returns a dict with both legacy keys ("vat", "wht", "subtotal", "total")
+    and explicit keys ("vat_amount", "wht_amount", "total_amount") so that all
+    calling code continues to work.
     """
     vatable_amount = float(vatable_amount or 0.0)
     non_vatable_amount = float(non_vatable_amount or 0.0)
@@ -53,11 +58,18 @@ def compute_invoice_totals(
     total_amount = subtotal + vat_amount - wht_amount
 
     return {
+        # short / legacy keys used in UI
+        "vat": vat_amount,
+        "wht": wht_amount,
+        "subtotal": subtotal,
+        "total": total_amount,
+        # explicit keys used in reporting / exports
         "vat_amount": vat_amount,
         "wht_amount": wht_amount,
-        "subtotal": subtotal,
         "total_amount": total_amount,
     }
+
+
 
 
 def _generate_invoice_number() -> str:
