@@ -58,6 +58,7 @@ def create_voucher(
     lines: List[Dict],
     file_name: Optional[str],
     file_bytes: Optional[bytes],
+    voucher_number: Optional[str] = None,
 ) -> Optional[str]:
     """
     Create a new voucher with line items and optional attachment.
@@ -69,6 +70,7 @@ def create_voucher(
     requester = (requester or "").strip()
     invoice_ref = (invoice_ref or "").strip()
     currency = (currency or "").strip() or "NGN"
+    voucher_number = (voucher_number or "").strip()
 
     if not vendor:
         return "Vendor is required."
@@ -129,7 +131,10 @@ def create_voucher(
     if not valid_lines:
         return "No valid voucher lines found."
 
-    voucher_number = generate_voucher_number(company_id)
+    # If not provided, auto-generate voucher number
+    if not voucher_number:
+        voucher_number = generate_voucher_number(company_id)
+
     ts = _now_ts()
 
     try:
@@ -738,3 +743,8 @@ def get_voucher_with_lines(
     header = get_voucher(company_id, voucher_id)
     lines = list_voucher_lines(company_id, voucher_id)
     return header, lines
+
+
+
+
+
