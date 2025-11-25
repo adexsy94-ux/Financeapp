@@ -525,3 +525,9 @@ def get_expense_asset_account_options(company_id: int) -> List[str]:
         return exp_asset
     names = [a["name"] for a in accounts]
     return names or ["-- Add accounts in CRM first --"]
+
+
+
+
+
+
