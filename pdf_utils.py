@@ -1,15 +1,18 @@
+"""
+pdf_utils.py - Voucher PDF + Company Settings helpers (VoucherPro-style layout)
 
-"""pdf_utils.py - Voucher PDF + Company Settings helpers (VoucherPro layout)
-
-This module is designed for your new financeapp but uses the SAME PDF layout,
-company settings, and embed/Excel helpers from your old VoucherPro code.
+This module is designed for your financeapp. It:
+- Stores and loads company settings from the company_settings table.
+- Provides embed_file() and excel_download_link_multi() helpers.
+- Generates voucher PDFs with build_voucher_pdf_bytes(company_id, voucher_id)
+  using a layout similar to your original VoucherPro app.
 """
 
 import base64
 from contextlib import closing
 from datetime import datetime
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -17,22 +20,25 @@ import streamlit as st
 from db_config import connect
 
 
-# ======================= COMPANY SETTINGS =======================
+# ======================= GENERAL HELPERS =======================
 
 def now_iso() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def get_company_settings() -> Dict[str, Any]:
-    """Return the single company_settings row (id = 1).
+# ======================= COMPANY SETTINGS =======================
 
-    This matches your old VoucherPro behaviour so the same settings
-    will appear in the PDF header (name, RC, TIN, address, title, etc).
+def get_company_settings() -> Dict[str, Any]:
+    """
+    Return the single company_settings row (id = 1).
+
+    This matches your original behaviour: one global company header that
+    appears on the voucher PDF (name, RC, TIN, address, title, etc).
     """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """
-            SELECT name, rc, tin, addr, title, 
+            SELECT name, rc, tin, addr, title,
                    authorizer_label, approval_label,
                    authorizer_name, approver_name,
                    department_default,
@@ -42,29 +48,31 @@ def get_company_settings() -> Dict[str, Any]:
             """
         )
         row = cur.fetchone()
-        if not row:
-            return {}
-        keys = [
-            "name",
-            "rc",
-            "tin",
-            "addr",
-            "title",
-            "authorizer_label",
-            "approval_label",
-            "authorizer_name",
-            "approver_name",
-            "department_default",
-            "company_doc_name",
-            "company_doc_data",
-        ]
-        return dict(zip(keys, row))
+    if not row:
+        return {}
+    keys = [
+        "name",
+        "rc",
+        "tin",
+        "addr",
+        "title",
+        "authorizer_label",
+        "approval_label",
+        "authorizer_name",
+        "approver_name",
+        "department_default",
+        "company_doc_name",
+        "company_doc_data",
+    ]
+    return dict(zip(keys, row))
 
 
 def save_company_settings(settings: Dict[str, Any]) -> None:
-    """Persist company header/footer/settings to the company_settings table.
+    """
+    Persist company header/footer/settings to the company_settings table.
 
-    This is copied from your old code so the UI + PDF share the same configuration.
+    Called from the Company Settings tab so that the UI and voucher PDF
+    share the same configuration.
     """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
@@ -72,7 +80,8 @@ def save_company_settings(settings: Dict[str, Any]) -> None:
             UPDATE company_settings
             SET name=%s, rc=%s, tin=%s, addr=%s, title=%s,
                 authorizer_label=%s, approval_label=%s,
-                authorizer_name=%s, approver_name=%s, department_default=%s,
+                authorizer_name=%s, approver_name=%s,
+                department_default=%s,
                 company_doc_name=%s, company_doc_data=%s
             WHERE id = 1
             """,
@@ -94,10 +103,11 @@ def save_company_settings(settings: Dict[str, Any]) -> None:
         conn.commit()
 
 
-# ======================= EMBED + EXCEL HELPERS =======================
+# ======================= STREAMLIT HELPERS =======================
 
 def embed_file(name: str, data: Optional[bytes]) -> None:
-    """Show an uploaded file inline in Streamlit.
+    """
+    Show an uploaded file inline in Streamlit.
 
     PDF  -> iframe preview
     JPG/PNG -> st.image
@@ -105,20 +115,40 @@ def embed_file(name: str, data: Optional[bytes]) -> None:
     if not data or not name:
         return
 
-    b64 = base64.b64encode(data).decode()
+    b64 = base64.b64encode(data).decode("utf-8")
 
-    if name.lower().endswith(".pdf"):
+    lower = name.lower()
+    if lower.endswith(".pdf"):
         # Inline PDF preview
         html = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="600"></iframe>'
         st.markdown(html, unsafe_allow_html=True)
-    else:
-        # Assume image
+    elif lower.endswith((".jpg", ".jpeg", ".png")):
         try:
             st.image(BytesIO(data), use_column_width=True)
         except Exception:
-            # Fallback: simple download link if image rendering fails
             href = f"data:application/octet-stream;base64,{b64}"
-            st.markdown(f'<a href="{href}" download="{name}">Download file</a>', unsafe_allow_html=True)
+            st.markdown(
+                f'<a href="{href}" download="{name}">Download file</a>',
+                unsafe_allow_html=True,
+            )
+    else:
+        href = f"data:application/octet-stream;base64,{b64}"
+        st.markdown(
+            f'<a href="{href}" download="{name}">Download file</a>',
+            unsafe_allow_html=True,
+        )
+
+
+def _strip_tz(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove timezone info to avoid Excel writer issues."""
+    try:
+        df = df.copy()
+        dt_tz_cols = df.select_dtypes(include=["datetimetz"]).columns
+        for col in dt_tz_cols:
+            df[col] = df[col].dt.tz_convert(None)
+    except Exception:
+        pass
+    return df
 
 
 def excel_download_link_multi(
@@ -129,21 +159,10 @@ def excel_download_link_multi(
     df_audit: pd.DataFrame,
     filename: str = "VoucherPro_Report",
 ) -> str:
-    """Build a single Excel file with multiple sheets and return an HTML download button.
-
-    This is the same helper you used before, now using openpyxl as the engine.
     """
-
-    def _strip_tz(df: pd.DataFrame) -> pd.DataFrame:
-        try:
-            df = df.copy()
-            dt_tz_cols = df.select_dtypes(include=["datetimetz"]).columns
-            for col in dt_tz_cols:
-                df[col] = df[col].dt.tz_convert(None)
-        except Exception:
-            pass
-        return df
-
+    Build a single Excel file with multiple sheets and return an HTML download button.
+    Sheets: Invoices, Vouchers, Line_Items, General_Journal, Audit_Trail.
+    """
     df_invoices = _strip_tz(df_invoices)
     df_vouchers = _strip_tz(df_vouchers)
     df_lines = _strip_tz(df_lines)
@@ -151,7 +170,6 @@ def excel_download_link_multi(
     df_audit = _strip_tz(df_audit)
 
     output = BytesIO()
-    # openpyxl is already part of your requirements from the old app
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_invoices.to_excel(writer, index=False, sheet_name="Invoices")
         df_vouchers.to_excel(writer, index=False, sheet_name="Vouchers")
@@ -159,7 +177,8 @@ def excel_download_link_multi(
         df_journal.to_excel(writer, index=False, sheet_name="General_Journal")
         df_audit.to_excel(writer, index=False, sheet_name="Audit_Trail")
     output.seek(0)
-    b64 = base64.b64encode(output.read()).decode()
+
+    b64 = base64.b64encode(output.read()).decode("utf-8")
     stamp = datetime.now().strftime("%Y%m%d")
     return (
         f'<a href="data:application/octet-stream;base64,{b64}" '
@@ -168,188 +187,191 @@ def excel_download_link_multi(
     )
 
 
-# ======================= OPTIONAL: CRM LOOKUP (for bank details) =======================
+# ======================= DB HELPERS FOR VOUCHERS =======================
 
-def _crm_df(sql: str, params: tuple = ()) -> pd.DataFrame:
-    """Read CRM tables from the same PostgreSQL DB using connect().
+def _fetch_voucher(company_id: int, voucher_id: int) -> Dict[str, Any]:
+    """Fetch a single voucher row as a dict. Very defensive about column names."""
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            "SELECT * FROM vouchers WHERE company_id = %s AND id = %s",
+            (company_id, voucher_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Voucher {voucher_id} not found for company {company_id}")
+        cols = [c[0] for c in cur.description]
+    return dict(zip(cols, row))
 
-    This is only used to enrich voucher PDFs with vendor bank details.
-    If the query fails for any reason, it just returns an empty DataFrame.
+
+def _fetch_voucher_lines(company_id: int, voucher_id: int) -> List[Dict[str, Any]]:
+    """Fetch all voucher_lines for a voucher as a list of dicts."""
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM voucher_lines
+            WHERE company_id = %s AND voucher_id = %s
+            ORDER BY line_no, id
+            """,
+            (company_id, voucher_id),
+        )
+        rows = cur.fetchall()
+        cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def _fetch_main_voucher_attachment(company_id: int, voucher_id: int) -> Optional[Dict[str, Any]]:
     """
+    Fetch the most recent attachment for this voucher, if any.
+    Returns {"file_name": ..., "file_data": ...} or None.
+    """
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        try:
+            cur.execute(
+                """
+                SELECT file_name, file_data
+                FROM voucher_documents
+                WHERE company_id = %s AND voucher_id = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (company_id, voucher_id),
+            )
+            row = cur.fetchone()
+        except Exception:
+            row = None
+    if not row:
+        return None
+    return {"file_name": row[0], "file_data": row[1]}
+
+
+# ======================= AMOUNT TO WORDS =======================
+
+ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+TEENS = [
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+]
+TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+THOUSANDS = ["", "thousand", "million", "billion", "trillion"]
+
+
+def _chunk_to_words(n: int) -> str:
+    parts: List[str] = []
+    h, rem = divmod(n, 100)
+    if h:
+        parts.append(ONES[h] + " hundred")
+        if rem:
+            parts.append("and")
+    if rem >= 20:
+        t, o = divmod(rem, 10)
+        parts.append(TENS[t])
+        if o:
+            parts.append(ONES[o])
+    elif rem >= 10:
+        parts.append(TEENS[rem - 10])
+    elif rem > 0:
+        parts.append(ONES[rem])
+    return " ".join(parts) if parts else "zero"
+
+
+def _int_to_words(n: int) -> str:
+    if n == 0:
+        return "zero"
+    words: List[str] = []
+    i = 0
+    while n > 0 and i < len(THOUSANDS):
+        n, chunk = divmod(n, 1000)
+        if chunk:
+            label = THOUSANDS[i]
+            chunk_words = _chunk_to_words(chunk)
+            if label:
+                words.append(f"{chunk_words} {label}")
+            else:
+                words.append(chunk_words)
+        i += 1
+    return " ".join(reversed(words))
+
+
+def amount_to_words(amount: float, currency: str = "NGN") -> str:
+    """Convert a numeric amount to words for the given currency."""
     try:
-        with closing(connect()) as conn:
-            return pd.read_sql_query(sql, conn, params=params)
+        amt = round(float(amount) + 1e-9, 2)
     except Exception:
-        return pd.DataFrame()
+        amt = 0.0
+    major = int(amt)
+    minor = int(round((amt - major) * 100))
+
+    cur = (currency or "NGN").upper()
+    if cur == "NGN":
+        major_name, minor_name = "naira", "kobo"
+    elif cur == "USD":
+        major_name, minor_name = "dollars", "cents"
+    elif cur == "GBP":
+        major_name, minor_name = "pounds", "pence"
+    elif cur == "EUR":
+        major_name, minor_name = "euros", "cents"
+    else:
+        major_name, minor_name = cur.lower(), "cents"
+
+    words = _int_to_words(major)
+    words = words[0].upper() + words[1:] if words else "Zero"
+
+    if minor > 0:
+        minor_words = _int_to_words(minor)
+        minor_words = minor_words[0].upper() + minor_words[1:]
+        return f"{words} {major_name}, {minor_words} {minor_name} only."
+    else:
+        return f"{words} {major_name} only."
 
 
-# ======================= ATTACHMENT IMAGE HELPERS =======================
+# ======================= VOUCHER PDF CORE =======================
 
-try:
-    import fitz  # PyMuPDF
-    PYMUPDF_OK = True
-except Exception:  # pragma: no cover - optional dependency
-    PYMUPDF_OK = False
-
-try:
-    from pdf2image import convert_from_bytes
-    PDF2IMAGE_OK = True
-except Exception:  # pragma: no cover - optional dependency
-    PDF2IMAGE_OK = False
+def _clean_currency_text(text: Any) -> str:
+    """Replace Naira symbol with 'NGN ' so it renders on systems without that glyph."""
+    try:
+        s = str(text if text is not None else "")
+    except Exception:
+        s = ""
+    return s.replace("₦", "NGN ")
 
 
-def _render_pdf_pages_to_pngs(file_bytes: bytes, max_pages: int = 4, dpi: int = 150) -> List[bytes]:
-    """Try PyMuPDF first; if unavailable, try pdf2image.
-
-    Returns a list of PNG bytes for up to max_pages pages.
-    """
-    images: List[bytes] = []
-
-    if PYMUPDF_OK:
-        try:
-            doc = fitz.open(stream=file_bytes, filetype="pdf")
-            count = min(max_pages, len(doc))
-            for i in range(count):
-                page = doc.load_page(i)
-                zoom = dpi / 72.0
-                mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                images.append(pix.tobytes("png"))
-            doc.close()
-            return images
-        except Exception:
-            pass
-
-    if PDF2IMAGE_OK:
-        try:
-            pil_imgs = convert_from_bytes(file_bytes, dpi=dpi, fmt="png")
-            for img in pil_imgs[:max_pages]:
-                buf = BytesIO()
-                img.save(buf, format="PNG")
-                images.append(buf.getvalue())
-            return images
-        except Exception:
-            pass
-
-    return images
-
-
-def _normalize_to_pages(file_name: Optional[str], file_bytes: Optional[bytes]) -> List[bytes]:
-    """Normalize a PDF or image upload into up to 4 page images (PNG bytes)."""
-    if not file_bytes or not file_name:
-        return []
-
-    lower = file_name.lower()
-    if lower.endswith(".pdf"):
-        return _render_pdf_pages_to_pngs(file_bytes, max_pages=4, dpi=160)
-
-    if lower.endswith((".jpg", ".jpeg", ".png")):
-        return [file_bytes]
-    return []
-
-
-from reportlab.platypus import Image as RLImage  # for _scaled_image_flowable
-
-
-def _scaled_image_flowable(img_bytes: bytes, max_w: float, max_h: float) -> RLImage:
-    """Scale an image to fit within max_w x max_h (points), preserving aspect ratio."""
-    safety = 2.0  # points
-    max_w_eff = max(1.0, max_w - safety)
-    max_h_eff = max(1.0, max_h - safety)
-
-    img = RLImage(BytesIO(img_bytes))
-    iw = float(getattr(img, "imageWidth", 0) or 0)
-    ih = float(getattr(img, "imageHeight", 0) or 0)
-
-    if iw <= 0 or ih <= 0:
-        img.hAlign = "CENTER"
-        return img
-
-    scale = min(max_w_eff / iw, max_h_eff / ih)
-    if not (0 < scale < 10000):
-        scale = 1.0
-
-    dw = iw * scale
-    dh = ih * scale
-
-    if dw > max_w_eff:
-        dw = max_w_eff
-    if dh > max_h_eff:
-        dh = max_h_eff
-
-    img.drawWidth = dw
-    img.drawHeight = dh
-    img.hAlign = "CENTER"
-    return img
-
-
-# ======================= VOUCHER PDF BUILDER (VoucherPro layout) =======================
-
-def build_voucher_pdf_bytes(
+def _build_voucher_pdf_from_struct(
     settings: Dict[str, Any],
     voucher_meta: Dict[str, Any],
     line_rows: List[Dict[str, Any]],
-    attachment: Optional[Tuple[Optional[str], Optional[bytes]]] = None,
+    attachment: Optional[Dict[str, Any]] = None,
 ) -> bytes:
-    """Generate a voucher PDF using the exact layout from your old VoucherPro app.
-
-    * Page 1: Header (company settings), voucher details, line items, totals, amount in words,
-      and signatures.
-    * Pages 2–5: At most 4 pages from the attached document (PDF or image), one per page.
-
-    The `settings` dict must come from `get_company_settings()` so that whatever you
-    configure on the Company Settings tab appears automatically in the PDF header.
     """
-
-    # --- Enrich voucher_meta with vendor bank details from CRM (optional) ---
-    try:
-        payee = voucher_meta.get("payable_to")
-        if payee:
-            vend_row = _crm_df(
-                "SELECT website, contact_person, bank_name, bank_account, notes FROM vendors WHERE name = %s",
-                (str(payee),),
-            )
-            if not vend_row.empty:
-                row0 = vend_row.iloc[0]
-                voucher_meta["website"] = (row0.get("website") or "") or ""
-                voucher_meta["contact_person"] = (row0.get("contact_person") or "") or ""
-                voucher_meta["bank"] = (row0.get("bank_name") or "") or ""
-                voucher_meta["acc_no"] = (row0.get("bank_account") or "") or ""
-                voucher_meta["vendor_notes"] = (row0.get("notes") or "") or ""
-    except Exception:
-        # Fail silently; PDF will just omit bank details if lookup fails
-        pass
-
+    Internal core: expect fully prepared settings, voucher_meta and line_rows.
+    attachment is {"file_name": ..., "file_data": ...} or None.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.lib.pagesizes import A4, landscape
     from reportlab.platypus import (
         SimpleDocTemplate,
         Paragraph,
         Spacer,
         Table,
         TableStyle,
-        Flowable,
         PageBreak,
-        KeepTogether,
     )
-    from reportlab.lib import colors
 
-    # ---------- helpers ----------
-    def scale_widths(widths: List[float], content_w: float) -> List[float]:
-        s = sum(widths) or 1.0
-        return [w * content_w / s for w in widths]
-
-    def _clean_currency_text(text: Any) -> str:
-        """Replace Naira symbol with 'NGN ' so it renders on systems without that glyph."""
-        try:
-            s = str(text if text is not None else "")
-        except Exception:
-            s = ""
-        return s.replace("₦", "NGN ")
-
-    def register_unicode_font() -> Dict[str, str]:
-        import os as _os
+    # Fonts
+    def _register_fonts() -> Dict[str, str]:
+        import os
 
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -361,9 +383,9 @@ def build_voucher_pdf_bytes(
         ]
         reg = bold = None
         for p in candidates:
-            if _os.path.exists(p) and p.lower().endswith("dejavusans.ttf"):
+            if os.path.exists(p) and p.lower().endswith("dejavusans.ttf"):
                 reg = p
-            if _os.path.exists(p) and p.lower().endswith("dejavusans-bold.ttf"):
+            if os.path.exists(p) and p.lower().endswith("dejavusans-bold.ttf"):
                 bold = p
         try:
             if reg:
@@ -376,134 +398,44 @@ def build_voucher_pdf_bytes(
             pass
         return {"regular": "Helvetica", "bold": "Helvetica-Bold"}
 
-    # ---------- number to words ----------
-    ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
-    TEENS = [
-        "ten",
-        "eleven",
-        "twelve",
-        "thirteen",
-        "fourteen",
-        "fifteen",
-        "sixteen",
-        "seventeen",
-        "eighteen",
-        "nineteen",
-    ]
-    TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
-    THOUSANDS = ["", "thousand", "million", "billion", "trillion", "quadrillion"]
+    fonts = _register_fonts()
 
-    def chunk_to_words(n: int) -> str:
-        parts: List[str] = []
-        h, rem = divmod(n, 100)
-        if h:
-            parts.append(ONES[h] + " hundred")
-            if rem:
-                parts.append("and")
-        if rem >= 20:
-            t, o = divmod(rem, 10)
-            parts.append(TENS[t])
-            if o:
-                parts.append(ONES[o])
-        elif rem >= 10:
-            parts.append(TEENS[rem - 10])
-        elif rem > 0:
-            parts.append(ONES[rem])
-        return " ".join(parts) if parts else "zero"
-
-    def int_to_words(n: int) -> str:
-        if n == 0:
-            return "zero"
-        words: List[str] = []
-        i = 0
-        while n > 0 and i < len(THOUSANDS):
-            n, chunk = divmod(n, 1000)
-            if chunk:
-                label = THOUSANDS[i]
-                chunk_words = chunk_to_words(chunk)
-                if label:
-                    words.append(f"{chunk_words} {label}")
-                else:
-                    words.append(chunk_words)
-            i += 1
-        return " ".join(reversed(words))
-
-    def amount_to_words(amount: float, currency: str = "NGN") -> str:
-        """Convert a numeric amount to words for the given currency."""
-        try:
-            amt = round(float(amount) + 1e-9, 2)
-        except Exception:
-            amt = 0.0
-        major = int(amt)
-        minor = int(round((amt - major) * 100))
-
-        cur = (currency or "NGN").upper()
-        if cur == "NGN":
-            major_name, minor_name = "naira", "kobo"
-        elif cur == "USD":
-            major_name, minor_name = "dollars", "cents"
-        elif cur == "GBP":
-            major_name, minor_name = "pounds", "pence"
-        elif cur == "EUR":
-            major_name, minor_name = "euros", "cents"
-        else:
-            major_name, minor_name = cur.lower(), "cents"
-
-        words = int_to_words(major)
-        words = words[0].upper() + words[1:] if words else "Zero"
-
-        if minor > 0:
-            minor_words = int_to_words(minor)
-            minor_words = minor_words[0].upper() + minor_words[1:]
-            return f"{words} {major_name}, {minor_words} {minor_name} only."
-        else:
-            return f"{words} {major_name} only."
-
-    # ---------- fonts & layout ----------
-    font_names = register_unicode_font()
-    MM = 72.0 / 25.4
-    left_margin = 10 * MM
-    right_margin = 10 * MM
-    top_margin = 4 * MM
-    bottom_margin = 4 * MM
-
-    page_size = landscape(A4)
-    PAGE_W, PAGE_H = page_size
-    content_w = PAGE_W - left_margin - right_margin
-    content_h = PAGE_H - top_margin - bottom_margin
-
+    # Layout
     buffer = BytesIO()
+    page_size = landscape(A4)
     doc = SimpleDocTemplate(
         buffer,
         pagesize=page_size,
-        leftMargin=left_margin,
-        rightMargin=right_margin,
-        topMargin=top_margin,
-        bottomMargin=bottom_margin,
+        leftMargin=10 * mm,
+        rightMargin=10 * mm,
+        topMargin=4 * mm,
+        bottomMargin=4 * mm,
     )
 
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="HeadBold", fontName=font_names["bold"], fontSize=12, leading=14))
-    styles.add(ParagraphStyle(name="HeadBig", fontName=font_names["bold"], fontSize=13, leading=16, alignment=1))
-    styles.add(ParagraphStyle(name="Small", fontName=font_names["regular"], fontSize=9, leading=11))
-    styles.add(ParagraphStyle(name="SmallBold", fontName=font_names["bold"], fontSize=9, leading=11))
+    styles.add(ParagraphStyle(name="HeadBig", fontName=fonts["bold"], fontSize=13, leading=16, alignment=1))
+    styles.add(ParagraphStyle(name="HeadBold", fontName=fonts["bold"], fontSize=12, leading=14))
+    styles.add(ParagraphStyle(name="Small", fontName=fonts["regular"], fontSize=9, leading=11))
+    styles.add(ParagraphStyle(name="SmallBold", fontName=fonts["bold"], fontSize=9, leading=11))
 
-    story: List[Flowable] = []
+    story: List[Any] = []
 
-    # ---------- Header block ----------
+    # Header block
+    name = settings.get("name") or ""
     addr_lines = (settings.get("addr") or "").splitlines()
-    right_block = "<br/>".join(filter(None, [settings.get("rc", ""), settings.get("tin", ""), *addr_lines]))
-    t0_colw = scale_widths([0.58, 0.42], content_w)
+    rc = settings.get("rc") or ""
+    tin = settings.get("tin") or ""
+    right_block_parts = [rc, tin] + addr_lines
+    right_block = "<br/>".join([p for p in right_block_parts if p])
+
     top_table = Table(
         [
             [
-                Paragraph(f"<b>{settings.get('name','')}</b>", styles["HeadBig"]),
+                Paragraph(f"<b>{name}</b>", styles["HeadBig"]),
                 Paragraph(right_block, styles["Small"]),
             ]
         ],
-        colWidths=t0_colw,
+        colWidths=[0.6 * doc.width, 0.4 * doc.width],
     )
     top_table.setStyle(
         TableStyle(
@@ -518,29 +450,34 @@ def build_voucher_pdf_bytes(
     story.append(top_table)
     story.append(Spacer(1, 4))
 
-    # Title + Voucher No
-    story.append(Paragraph(settings.get("title", "EFT/CHEQUE/CASH REQUISITION"), styles["HeadBold"]))
-    voucher_no = voucher_meta.get("voucher_number", "")
+    # Title + voucher number
+    title = settings.get("title") or "EFT/CHEQUE/CASH REQUISITION"
+    story.append(Paragraph(title, styles["HeadBold"]))
+
+    voucher_no = voucher_meta.get("voucher_number") or ""
     if voucher_no:
         story.append(Paragraph(f"VOUCHER NO: <b>{voucher_no}</b>", styles["Small"]))
     story.append(Spacer(1, 4))
 
-    # ---------- Table 1: Date/Amount + Requested/Dept ----------
-    t1_colw = scale_widths([90, 320, 100, 218], content_w)
+    # Block 1: Date / Amount / Requested / Department
+    date_str = voucher_meta.get("date_str") or ""
+    amount_str = _clean_currency_text(voucher_meta.get("amount_str") or "")
+    requested_by = voucher_meta.get("requested_by") or ""
+    department = voucher_meta.get("department") or ""
+
     block1 = Table(
         [
-            ["DATE", voucher_meta.get("date_str", ""), "AMOUNT", _clean_currency_text(voucher_meta.get("amount_str", ""))],
-            ["REQUESTED. BY", voucher_meta.get("requested_by", ""), "DEPARTMENT", voucher_meta.get("department", "")],
+            ["DATE", date_str, "AMOUNT", amount_str],
+            ["REQUESTED BY", requested_by, "DEPARTMENT", department],
         ],
-        colWidths=t1_colw,
+        colWidths=[90, 320, 100, doc.width - 90 - 320 - 100],
     )
     block1.setStyle(
         TableStyle(
             [
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
-                ("FONTNAME", (0, 0), (-1, -1), font_names["regular"]),
+                ("FONTNAME", (0, 0), (-1, -1), fonts["regular"]),
                 ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
-                ("ALIGN", (1, 0), (1, 0), "LEFT"),
                 ("ALIGN", (3, 0), (3, 0), "RIGHT"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -550,26 +487,29 @@ def build_voucher_pdf_bytes(
     story.append(block1)
     story.append(Spacer(1, 4))
 
-    # ---------- Table 2: Bank/payee strip ----------
-    t2_colw = scale_widths([95, 220, 95, 200, 120, 98], content_w)
+    # Block 2: Payee / Bank / Account
+    payable_to = voucher_meta.get("payable_to") or ""
+    bank = voucher_meta.get("bank") or ""
+    acc_no = voucher_meta.get("acc_no") or ""
+
     block2 = Table(
         [
             [
                 "PAYABLE TO",
-                voucher_meta.get("payable_to", ""),
+                payable_to,
                 "BANK NAME",
-                voucher_meta.get("bank", ""),
+                bank,
                 "ACCOUNT NUMBER",
-                voucher_meta.get("acc_no", ""),
+                acc_no,
             ]
         ],
-        colWidths=t2_colw,
+        colWidths=[95, 220, 95, 200, 120, doc.width - 95 - 220 - 95 - 200 - 120],
     )
     block2.setStyle(
         TableStyle(
             [
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
-                ("FONTNAME", (0, 0), (-1, -1), font_names["regular"]),
+                ("FONTNAME", (0, 0), (-1, -1), fonts["regular"]),
                 ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -579,9 +519,7 @@ def build_voucher_pdf_bytes(
     story.append(block2)
     story.append(Spacer(1, 6))
 
-    # ---------- Table 3: Line items ----------
-    t3_colw = scale_widths([140, 300, 70, 70, 70, 58], content_w)
-
+    # Line items table
     header = ["INV NO.", "DETAILS", "AMOUNT", "VAT AMT", "WHT AMT", "PAYABLE AMT"]
     rows: List[List[Any]] = [header]
 
@@ -591,28 +529,23 @@ def build_voucher_pdf_bytes(
     sum_payable = 0.0
 
     for r in line_rows:
-        amt = float(r.get("_amount", 0.0) or 0.0)
-        vat = float(r.get("_vat", 0.0) or 0.0)
-        wht = float(r.get("_wht", 0.0) or 0.0)
-        payable = (amt + vat) - wht
+        amt = float(r.get("amount", r.get("_amount", 0.0)) or 0.0)
+        vat = float(r.get("vat", r.get("_vat", 0.0)) or 0.0)
+        wht = float(r.get("wht", r.get("_wht", 0.0)) or 0.0)
+        payable = float(r.get("total", r.get("payable", (amt + vat - wht))) or 0.0)
 
         sum_amount += amt
         sum_vat += vat
         sum_wht += wht
         sum_payable += payable
 
-        inv_no_text = r.get("inv_no", "")
-        details_text = r.get("details", "")
-
-        from reportlab.platypus import Paragraph as RLParagraph
-
-        inv_no_para = RLParagraph(str(inv_no_text), styles["Small"])
-        details_para = RLParagraph(str(details_text), styles["Small"])
+        inv_no_text = r.get("inv_no") or ""
+        details_text = r.get("details") or ""
 
         rows.append(
             [
-                inv_no_para,
-                details_para,
+                str(inv_no_text),
+                Paragraph(str(details_text), styles["Small"]),
                 _clean_currency_text(r.get("amount_str", f"{amt:,.2f}")),
                 _clean_currency_text(r.get("vat_str", f"{vat:,.2f}")),
                 _clean_currency_text(r.get("wht_str", f"{wht:,.2f}" if wht else "-")),
@@ -620,6 +553,7 @@ def build_voucher_pdf_bytes(
             ]
         )
 
+    # Ensure at least a few blank rows for neatness
     while len(rows) < 10:
         rows.append(["", "", "", "", "", ""])
 
@@ -634,14 +568,14 @@ def build_voucher_pdf_bytes(
         ]
     )
 
-    line_table = Table(rows, colWidths=t3_colw, repeatRows=1)
+    line_table = Table(rows, colWidths=[140, 300, 70, 70, 70, doc.width - 140 - 300 - 70 - 70 - 70])
     line_table.setStyle(
         TableStyle(
             [
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("FONTNAME", (0, 0), (-1, 0), font_names["bold"]),
-                ("FONTNAME", (0, 1), (-1, -1), font_names["regular"]),
+                ("FONTNAME", (0, 0), (-1, 0), fonts["bold"]),
+                ("FONTNAME", (0, 1), (-1, -1), fonts["regular"]),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (0, 0), (-1, 0), "CENTER"),
@@ -652,77 +586,149 @@ def build_voucher_pdf_bytes(
     story.append(line_table)
     story.append(Spacer(1, 4))
 
-    voucher_currency = (voucher_meta.get("currency") or "NGN") if isinstance(voucher_meta, dict) else "NGN"
-    amt_words = amount_to_words(sum_payable, voucher_currency)
+    # Amount in words
+    currency = voucher_meta.get("currency") or "NGN"
+    amt_words = amount_to_words(sum_payable, currency)
     story.append(Paragraph(f"<b>Payable amount (in words):</b> {amt_words}", styles["Small"]))
     story.append(Spacer(1, 6))
 
-    # ---------- Signatures ----------
-    sig_headers = ["Activity", "Name", "Date", "Signature"]
-    requested_by = voucher_meta.get("requested_by", "")
-    authorised_name = voucher_meta.get("authorizer", settings.get("authorizer_name", ""))
-    approved_name = voucher_meta.get("approver", settings.get("approver_name", ""))
-    date_val = voucher_meta.get("date_str", "")
+    # Signatures
+    requested_by = voucher_meta.get("requested_by") or ""
+    authorised_name = voucher_meta.get("authorizer") or settings.get("authorizer_name") or ""
+    approved_name = voucher_meta.get("approver") or settings.get("approver_name") or ""
+    date_val = voucher_meta.get("date_str") or ""
 
-    t4_colw = scale_widths([120, 360, 120, 128], content_w)
     sig_rows = [
-        sig_headers,
+        ["Activity", "Name", "Date", "Signature"],
         ["Requested by", requested_by, date_val, ""],
         ["Authorised by", authorised_name, date_val, ""],
         ["Approved by", approved_name, date_val, ""],
     ]
-    sig_table = Table(sig_rows, colWidths=t4_colw)
+    sig_table = Table(sig_rows, colWidths=[120, 360, 120, doc.width - 120 - 360 - 120])
     sig_table.setStyle(
         TableStyle(
             [
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-                ("FONTNAME", (0, 0), (-1, 0), font_names["bold"]),
-                ("FONTNAME", (0, 1), (-1, -1), font_names["regular"]),
+                ("FONTNAME", (0, 0), (-1, 0), fonts["bold"]),
+                ("FONTNAME", (0, 1), (-1, -1), fonts["regular"]),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("TOPPADDING", (3, 1), (3, -1), 18),
                 ("BOTTOMPADDING", (3, 1), (3, -1), 18),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("ALIGN", (0, 0), (-1, 0), "LEFT"),
             ]
         )
     )
-    story.append(KeepTogether(sig_table))
+    story.append(sig_table)
 
-    # ---------- Attachment pages ----------
-    page_imgs: List[bytes] = []
-
-    if attachment:
-        try:
-            if isinstance(attachment, (list, tuple)) and attachment and isinstance(attachment[0], (list, tuple)):
-                for name_bytes in attachment:
-                    if not name_bytes or len(name_bytes) < 2:
-                        continue
-                    att_name, att_bytes = name_bytes[0], name_bytes[1]
-                    if not att_name or not att_bytes:
-                        continue
-                    new_pages = _normalize_to_pages(att_name, att_bytes)
-                    for p in new_pages:
-                        page_imgs.append(p)
-                        if len(page_imgs) >= 4:
-                            break
-                    if len(page_imgs) >= 4:
-                        break
-            else:
-                att_name, att_bytes = attachment  # type: ignore[misc]
-                if att_name and att_bytes:
-                    page_imgs = _normalize_to_pages(att_name, att_bytes)[:4]
-        except Exception:
-            page_imgs = []
-
-    if page_imgs:
-        avail_w = content_w
-        avail_h = content_h - 12
-
-        for img_bytes in page_imgs:
-            story.append(PageBreak())
-            img = _scaled_image_flowable(img_bytes, max_w=avail_w, max_h=avail_h)
-            story.append(img)
+    # Optional: simple extra page showing the first attachment as-is (no conversion)
+    if attachment and attachment.get("file_name") and attachment.get("file_data"):
+        story.append(PageBreak())
+        story.append(
+            Paragraph(
+                f"Attached document stored in the system: {attachment['file_name']}",
+                styles["Small"],
+            )
+        )
 
     doc.build(story)
     return buffer.getvalue()
+
+
+# ======================= PUBLIC API =======================
+
+def build_voucher_pdf_bytes(
+    company_id: int,
+    voucher_id: int,
+) -> bytes:
+    """
+    Public function used by app_main.py:
+
+        pdf_bytes = build_voucher_pdf_bytes(company_id, voucher_id)
+
+    It loads all data from the database, builds the voucher_meta and line_rows
+    and then calls the core _build_voucher_pdf_from_struct().
+    """
+    settings = get_company_settings()
+    voucher = _fetch_voucher(company_id, voucher_id)
+    lines = _fetch_voucher_lines(company_id, voucher_id)
+    attachment = _fetch_main_voucher_attachment(company_id, voucher_id)
+
+    # Build voucher_meta
+    date_val = (
+        voucher.get("date")
+        or voucher.get("voucher_date")
+        or voucher.get("created_at")
+        or voucher.get("last_modified")
+    )
+    if isinstance(date_val, datetime):
+        date_str = date_val.strftime("%Y-%m-%d")
+    else:
+        date_str = str(date_val or "")
+
+    # Compute total payable from lines if not stored
+    if lines:
+        total_payable = 0.0
+        for ln in lines:
+            amt = float(ln.get("amount") or 0.0)
+            vat = float(ln.get("vat_value") or 0.0)
+            wht = float(ln.get("wht_value") or 0.0)
+            total_payable += (amt + vat - wht)
+    else:
+        try:
+            total_payable = float(voucher.get("payable_total") or 0.0)
+        except Exception:
+            total_payable = 0.0
+
+    currency = voucher.get("currency") or "NGN"
+
+    voucher_meta: Dict[str, Any] = {
+        "voucher_number": voucher.get("voucher_number") or f"V{voucher_id}",
+        "date_str": date_str,
+        "amount_str": f"{total_payable:,.2f}",
+        "requested_by": voucher.get("requester") or "",
+        "department": voucher.get("department") or "",
+        "payable_to": voucher.get("vendor") or "",
+        "bank": voucher.get("bank_name") or "",
+        "acc_no": voucher.get("bank_account") or "",
+        "authorizer": voucher.get("authorizer") or "",
+        "approver": voucher.get("approver") or "",
+        "currency": currency,
+    }
+
+    # Build line_rows
+    line_rows: List[Dict[str, Any]] = []
+    for ln in lines:
+        amt = float(ln.get("amount") or 0.0)
+        vat = float(ln.get("vat_value") or 0.0)
+        wht = float(ln.get("wht_value") or 0.0)
+        total = float(ln.get("total") or (amt + vat - wht))
+
+        inv_no = (
+            ln.get("invoice")
+            or ln.get("invoice_ref")
+            or ln.get("invoice_number")
+            or ""
+        )
+
+        line_rows.append(
+            {
+                "inv_no": inv_no,
+                "details": ln.get("description") or "",
+                "amount": amt,
+                "vat": vat,
+                "wht": wht,
+                "total": total,
+                "amount_str": f"{amt:,.2f}",
+                "vat_str": f"{vat:,.2f}",
+                "wht_str": f"{wht:,.2f}" if wht else "-",
+                "payable_str": f"{total:,.2f}",
+            }
+        )
+
+    return _build_voucher_pdf_from_struct(
+        settings=settings,
+        voucher_meta=voucher_meta,
+        line_rows=line_rows,
+        attachment=attachment,
+    )
