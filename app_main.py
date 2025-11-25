@@ -4,6 +4,9 @@
 import streamlit as st
 import pandas as pd
 import psycopg2
+import io
+import base64
+
 
 from typing import List, Dict, Any, Optional
 from contextlib import closing
@@ -73,6 +76,41 @@ def money(value: float, currency: str = "NGN") -> str:
         v = 0.0
     # Simple formatting without localisation
     return f"{currency} {v:,.2f}"
+
+
+
+def excel_download_link_multi(
+    df_invoices: pd.DataFrame,
+    df_vouchers: pd.DataFrame,
+    df_lines: pd.DataFrame,
+    df_journal: pd.DataFrame,
+    df_audit: pd.DataFrame,
+    filename: str = "finance_reports.xlsx",
+) -> str:
+    """
+    Build a single Excel file with multiple sheets and return a download link (HTML).
+    """
+    output = io.BytesIO()
+
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        if not df_invoices.empty:
+            df_invoices.to_excel(writer, sheet_name="Invoices", index=False)
+        if not df_vouchers.empty:
+            df_vouchers.to_excel(writer, sheet_name="Vouchers", index=False)
+        if not df_lines.empty:
+            df_lines.to_excel(writer, sheet_name="Voucher Lines", index=False)
+        if not df_journal.empty:
+            df_journal.to_excel(writer, sheet_name="Journal", index=False)
+        if not df_audit.empty:
+            df_audit.to_excel(writer, sheet_name="Audit Log", index=False)
+
+    output.seek(0)
+    b64 = base64.b64encode(output.read()).decode("utf-8")
+    href = (
+        f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;'
+        f'base64,{b64}" download="{filename}">📥 Download all reports as Excel</a>'
+    )
+    return href
 
 
 def safe_index(options: List[Any], value: Any) -> int:
@@ -961,6 +999,12 @@ def app_vouchers():
     vendor = row1_col1.selectbox("Vendor (from CRM)", vendor_options)
     requester = row1_col2.selectbox("Requester (Staff in CRM)", requester_options)
 
+    voucher_number = st.text_input(
+        "Voucher Number (optional)",
+        value="",
+        help="Leave blank to auto-generate a voucher number (e.g. VCH-YYYYMMDDHHMMSS).",
+    )
+
     # Link vouchers to invoices for this vendor
     all_invoices = list_invoices(company_id=company_id)
     invoice_numbers_for_vendor = [
@@ -1244,6 +1288,7 @@ def app_vouchers():
                 lines=lines,
                 file_name=file_name,
                 file_bytes=file_bytes,
+                voucher_number=voucher_number.strip() or None,
             )
             if err:
                 st.error(err)
@@ -1520,606 +1565,517 @@ def app_reports():
     user = current_user()
     company_id = user["company_id"]
 
-    # Permissions for actions from reports
-    can_modify = bool(
-        user.get("can_create_voucher") or user.get("can_approve_voucher")
-    )
-    can_approve = bool(user.get("can_approve_voucher"))
-
-    st.subheader("Reports")
-
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        [
-            "Voucher Register",
-            "Invoice Register",
-            "Journal",
-            "General Ledger",
-            "Trial Balance",
-            "CRM / Master Data",
-        ]
+    st.markdown(
+        "<div class='card'><div class='card-header'>📊 Complete Financial Reports</div>",
+        unsafe_allow_html=True,
     )
 
-    # ---------------- Voucher Register ----------------
-    with tab1:
-        st.markdown("### Voucher Register")
-        vdf = pd.DataFrame(list_vouchers(company_id=company_id))
-        if vdf.empty:
-            st.info("No vouchers yet.")
-        else:
-            # Simple filters: by vendor and status if those columns exist
-            if "vendor" in vdf.columns:
-                vendors = ["(All)"] + sorted(
-                    [v for v in vdf["vendor"].dropna().unique().tolist()]
-                )
-                vendor_filter = st.selectbox("Filter by Vendor", vendors)
-                if vendor_filter != "(All)":
-                    vdf = vdf[vdf["vendor"] == vendor_filter]
+    # --- Fetch latest vouchers & invoices for this company ---
+    vdf_raw = pd.DataFrame(list_vouchers(company_id=company_id))
+    idf_raw = pd.DataFrame(list_invoices(company_id=company_id))
 
-            if "status" in vdf.columns:
-                statuses = ["(All)"] + sorted(
-                    [s for s in vdf["status"].dropna().unique().tolist()]
-                )
-                status_filter = st.selectbox("Filter by Status", statuses)
-                if status_filter != "(All)":
-                    vdf = vdf[vdf["status"] == status_filter]
+    # For now we treat all rows as "latest" – versioning can be added later if needed
+    vdf_latest = vdf_raw.copy()
+    idf_latest = idf_raw.copy()
 
-            if "currency" in vdf.columns:
-                currencies = ["(All)"] + sorted(
-                    [c for c in vdf["currency"].dropna().unique().tolist()]
-                )
-                currency_filter = st.selectbox(
-                    "Filter by Currency", currencies, key="vreg_currency_filter"
-                )
-                if currency_filter != "(All)":
-                    vdf = vdf[vdf["currency"] == currency_filter]
+    # Helper: lines for a voucher as DataFrame
+    def get_lines_for_voucher(voucher_id: int) -> pd.DataFrame:
+        lines = list_voucher_lines(company_id, voucher_id)
+        return pd.DataFrame(lines) if lines else pd.DataFrame()
 
-            st.dataframe(vdf)
+    # ===================== INVOICE SUMMARY =====================
+    invoice_rows: List[Dict[str, Any]] = []
 
-            st.markdown("### Voucher Actions (per voucher)")
-            for _, row in vdf.iterrows():
-                vid = int(row["id"])
-                header_text = (
-                    f"#{vid} – {row.get('voucher_number', '')} – "
-                    f"{row.get('vendor', '')} (Status: {row.get('status', '')})"
-                )
-                with st.expander(header_text, expanded=False):
-                    st.write("**Basic Info**")
-                    st.write(f"Voucher ID: {vid}")
-                    st.write(f"Voucher Number: {row.get('voucher_number', '')}")
-                    st.write(f"Vendor: {row.get('vendor', '')}")
-                    st.write(f"Requester: {row.get('requester', '')}")
-                    st.write(f"Invoice Ref: {row.get('invoice_ref', '')}")
-                    st.write(f"Currency: {row.get('currency', '')}")
-                    st.write(f"Status: {row.get('status', '')}")
-                    st.write(f"Created At: {row.get('created_at', '')}")
-                    st.write(f"Last Modified: {row.get('last_modified', '')}")
-                    st.write(f"Approved By: {row.get('approved_by', '')}")
-                    st.write(f"Approved At: {row.get('approved_at', '')}")
+    if not idf_latest.empty:
+        for _, inv in idf_latest.iterrows():
+            inv_num = inv["invoice_number"]
+            gross = float(inv.get("total_amount", 0.0))
+            vatable = float(inv.get("vatable_amount", 0.0))
+            vat_amt = float(inv.get("vat_amount", 0.0))
+            wht_amt = float(inv.get("wht_amount", 0.0))
+            non_vatable = float(inv.get("non_vatable_amount", 0.0))
+            payable = float(inv.get("subtotal", 0.0))
 
-                    if not can_modify:
-                        st.info(
-                            "You have view-only access. Contact an admin to update or delete vouchers."
-                        )
-                    else:
-                        st.markdown("---")
-                        c1, c2, c3 = st.columns(3)
-                        current_status = (row.get("status") or "draft").lower()
-                        status_options = ["draft", "submitted", "approved", "rejected"]
-                        try:
-                            default_status_index = status_options.index(current_status)
-                        except ValueError:
-                            default_status_index = 0
-
-                        with c1:
-                            new_status = st.selectbox(
-                                "Change Status",
-                                status_options,
-                                index=default_status_index,
-                                key=f"v_status_{vid}",
-                            )
-
-                        with c2:
-                            if st.button(
-                                "Update Status",
-                                key=f"v_update_{vid}",
-                            ):
-                                if new_status in ("approved", "rejected") and not can_approve:
-                                    st.error(
-                                        "You do not have permission to approve or reject vouchers."
-                                    )
-                                else:
-                                    err = change_voucher_status(
-                                        company_id=company_id,
-                                        voucher_id=vid,
-                                        new_status=new_status,
-                                        actor_username=user["username"],
-                                    )
-                                    if err:
-                                        st.error(err)
-                                    else:
-                                        st.success(
-                                            f"Voucher {vid} updated to status '{new_status}'."
-                                        )
-                                        st.experimental_rerun()
-
-                        with c3:
-                            if st.button(
-                                "Delete Voucher",
-                                key=f"v_delete_{vid}",
-                            ):
-                                if not can_approve:
-                                    st.error(
-                                        "You do not have permission to delete vouchers."
-                                    )
-                                else:
-                                    err = delete_voucher(
-                                        company_id=company_id,
-                                        voucher_id=vid,
-                                        actor_username=user["username"],
-                                    )
-                                    if err:
-                                        st.error(err)
-                                    else:
-                                        st.success(f"Voucher {vid} deleted.")
-                                        st.experimental_rerun()
-
-    # ---------------- Invoice Register ----------------
-    with tab2:
-        st.markdown("### Invoice Register")
-        idf = pd.DataFrame(list_invoices(company_id=company_id))
-        if idf.empty:
-            st.info("No invoices yet.")
-        else:
-            if "vendor" in idf.columns:
-                vendors = ["(All)"] + sorted(
-                    [v for v in idf["vendor"].dropna().unique().tolist()]
-                )
-                vendor_filter = st.selectbox(
-                    "Filter by Vendor", vendors, key="inv_vendor_filter"
-                )
-                if vendor_filter != "(All)":
-                    idf = idf[idf["vendor"] == vendor_filter]
-
-            if "currency" in idf.columns:
-                currencies = ["(All)"] + sorted(
-                    [c for c in idf["currency"].dropna().unique().tolist()]
-                )
-                currency_filter = st.selectbox(
-                    "Filter by Currency", currencies, key="inv_currency_filter"
-                )
-                if currency_filter != "(All)":
-                    idf = idf[idf["currency"] == currency_filter]
-
-            st.dataframe(idf)
-
-            st.markdown("### Invoice Actions (per invoice)")
-
-            vendor_options = get_vendor_name_list(company_id)
-            payable_options = get_payable_account_options(company_id)
-            expense_asset_options = get_expense_asset_account_options(company_id)
-
-            for _, row in idf.iterrows():
-                iid = int(row["id"])
-                header_text = (
-                    f"#{iid} – {row.get('invoice_number', '')} – "
-                    f"{row.get('vendor', '')} ({row.get('currency', '')})"
-                )
-                with st.expander(header_text, expanded=False):
-                    st.write("**Current Values**")
-                    st.write(f"Invoice ID: {iid}")
-                    st.write(f"Invoice Number: {row.get('invoice_number', '')}")
-                    st.write(f"Vendor: {row.get('vendor', '')}")
-                    st.write(
-                        f"Vendor Invoice No.: {row.get('vendor_invoice_number', '')}"
-                    )
-                    st.write(f"Summary: {row.get('summary', '')}")
-                    st.write(f"Currency: {row.get('currency', '')}")
-                    st.write(f"Vatable Amount: {row.get('vatable_amount', '')}")
-                    st.write(f"Non-vatable Amount: {row.get('non_vatable_amount', '')}")
-                    st.write(f"VAT Rate: {row.get('vat_rate', '')}")
-                    st.write(f"WHT Rate: {row.get('wht_rate', '')}")
-                    st.write(f"Payable Account: {row.get('payable_account', '')}")
-                    st.write(
-                        f"Expense / Asset Account: {row.get('expense_asset_account', '')}"
-                    )
-                    st.write(f"Terms: {row.get('terms', '')}")
-                    st.write(f"Last Modified: {row.get('last_modified', '')}")
-
-                    if not can_modify:
-                        st.info(
-                            "You have view-only access. Contact an admin to update or delete invoices."
-                        )
-                    else:
-                        st.markdown("---")
-                        st.write("**Edit Invoice**")
-
-                        with st.form(f"edit_invoice_form_{iid}"):
-                            vendor_value = row.get("vendor") or ""
-                            if vendor_value in vendor_options:
-                                vendor_index = vendor_options.index(vendor_value)
-                            else:
-                                vendor_index = 0 if vendor_options else 0
-
-                            vendor = st.selectbox(
-                                "Vendor (from CRM)",
-                                vendor_options,
-                                index=vendor_index if vendor_options else 0,
-                                key=f"inv_edit_vendor_{iid}",
-                            )
-
-                            vendor_invoice_number = st.text_input(
-                                "Vendor Invoice Number",
-                                value=row.get("vendor_invoice_number") or "",
-                                key=f"inv_edit_vendor_inv_no_{iid}",
-                            )
-
-                            summary = st.text_area(
-                                "Summary",
-                                value=row.get("summary") or "",
-                                key=f"inv_edit_summary_{iid}",
-                            )
-
-                            vatable_amount = st.number_input(
-                                "Vatable Amount",
-                                min_value=0.0,
-                                step=0.01,
-                                value=float(row.get("vatable_amount") or 0.0),
-                                key=f"inv_edit_vatable_{iid}",
-                            )
-
-                            vat_rate = st.number_input(
-                                "VAT Rate (%)",
-                                min_value=0.0,
-                                step=0.5,
-                                value=float(row.get("vat_rate") or 0.0),
-                                key=f"inv_edit_vat_rate_{iid}",
-                            )
-
-                            wht_rate = st.number_input(
-                                "WHT Rate (%)",
-                                min_value=0.0,
-                                step=0.5,
-                                value=float(row.get("wht_rate") or 0.0),
-                                key=f"inv_edit_wht_rate_{iid}",
-                            )
-
-                            non_vatable_amount = st.number_input(
-                                "Non-vatable Amount",
-                                min_value=0.0,
-                                step=0.01,
-                                value=float(row.get("non_vatable_amount") or 0.0),
-                                key=f"inv_edit_non_vatable_{iid}",
-                            )
-
-                            terms = st.text_area(
-                                "Terms",
-                                value=row.get("terms") or "",
-                                key=f"inv_edit_terms_{iid}",
-                            )
-
-                            currency_value = (row.get("currency") or "NGN").upper()
-                            currency_options = ["NGN", "USD", "GBP", "EUR"]
-                            if currency_value not in currency_options:
-                                currency_options.append(currency_value)
-                            try:
-                                currency_index = currency_options.index(currency_value)
-                            except ValueError:
-                                currency_index = 0
-
-                            currency = st.selectbox(
-                                "Currency",
-                                currency_options,
-                                index=currency_index,
-                                key=f"inv_edit_currency_{iid}",
-                            )
-
-                            payable_value = row.get("payable_account") or ""
-                            if payable_value in payable_options:
-                                payable_index = payable_options.index(payable_value)
-                            else:
-                                payable_index = 0 if payable_options else 0
-
-                            payable_account = st.selectbox(
-                                "Payable Account (Chart of Accounts)",
-                                payable_options,
-                                index=payable_index if payable_options else 0,
-                                key=f"inv_edit_payable_{iid}",
-                            )
-
-                            expense_value = row.get("expense_asset_account") or ""
-                            if expense_value in expense_asset_options:
-                                expense_index = expense_asset_options.index(expense_value)
-                            else:
-                                expense_index = 0 if expense_asset_options else 0
-
-                            expense_asset_account = st.selectbox(
-                                "Expense / Asset Account (Chart of Accounts)",
-                                expense_asset_options,
-                                index=expense_index if expense_asset_options else 0,
-                                key=f"inv_edit_expense_{iid}",
-                            )
-
-                            uploaded_file = st.file_uploader(
-                                "Replace invoice document (optional)",
-                                type=["pdf", "jpg", "png"],
-                                key=f"inv_edit_file_{iid}",
-                            )
-                            file_name = None
-                            file_bytes = None
-                            if uploaded_file is not None:
-                                file_name = uploaded_file.name
-                                file_bytes = uploaded_file.read()
-
-                            save_btn = st.form_submit_button("Save Changes")
-                            if save_btn:
-                                err = update_invoice(
-                                    company_id=company_id,
-                                    invoice_id=iid,
-                                    vendor_invoice_number=vendor_invoice_number,
-                                    vendor=vendor,
-                                    summary=summary,
-                                    vatable_amount=vatable_amount,
-                                    vat_rate=vat_rate,
-                                    wht_rate=wht_rate,
-                                    non_vatable_amount=non_vatable_amount,
-                                    terms=terms,
-                                    payable_account=payable_account,
-                                    expense_asset_account=expense_asset_account,
-                                    currency=currency,
-                                    username=user["username"],
-                                    file_name=file_name,
-                                    file_data=file_bytes,
-                                )
-                                if err:
-                                    st.error(err)
-                                else:
-                                    st.success(
-                                        f"Invoice {iid} updated successfully."
-                                    )
-                                    st.experimental_rerun()
-
-                        st.markdown("---")
-                        if st.button(
-                            "Delete Invoice",
-                            key=f"inv_delete_{iid}",
-                        ):
-                            if not can_modify:
-                                st.error(
-                                    "You do not have permission to delete invoices."
-                                )
-                            else:
-                                err = delete_invoice(
-                                    company_id=company_id,
-                                    invoice_id=iid,
-                                    username=user["username"],
-                                )
-                                if err:
-                                    st.error(err)
-                                else:
-                                    st.success(f"Invoice {iid} deleted.")
-                                    st.experimental_rerun()
-
-    # ---------------- Journal (voucher lines) ----------------
-    with tab3:
-        st.markdown("### Journal – Voucher Lines (by Currency)")
-
-        # Pull voucher lines directly for a journal-style view
-        try:
-            with connect() as conn:
-                jdf = pd.read_sql_query(
-                    """
-                    SELECT
-                        vl.id,
-                        vl.voucher_id,
-                        vl.line_no,
-                        vl.description,
-                        vl.account_name,
-                        vl.amount,
-                        vl.vat_percent,
-                        vl.wht_percent,
-                        vl.vat_value,
-                        vl.wht_value,
-                        vl.total,
-                        v.voucher_number,
-                        v.vendor,
-                        v.requester,
-                        v.invoice_ref,
-                        v.currency,
-                        v.status,
-                        v.created_at
-                    FROM voucher_lines vl
-                    JOIN vouchers v
-                      ON v.id = vl.voucher_id
-                    WHERE v.company_id = %s
-                    ORDER BY v.created_at, vl.voucher_id, vl.line_no
-                    """,
-                    conn,
-                    params=(company_id,),
-                )
-        except Exception as e:
-            jdf = pd.DataFrame()
-            st.error(f"Error loading journal data: {e}")
-
-        if jdf.empty:
-            st.info("No voucher lines yet – journal is empty.")
-        else:
-            if "currency" in jdf.columns:
-                currencies = sorted(jdf["currency"].dropna().unique().tolist())
-            else:
-                currencies = []
-
-            if not currencies:
-                st.dataframe(jdf)
-            else:
-                for cur in currencies:
-                    st.markdown(f"#### Currency: {cur}")
-                    sub = jdf[jdf["currency"] == cur].copy()
-                    st.dataframe(
-                        sub[
-                            [
-                                "created_at",
-                                "voucher_number",
-                                "line_no",
-                                "account_name",
-                                "description",
-                                "amount",
-                                "vat_value",
-                                "wht_value",
-                                "total",
-                                "status",
-                            ]
-                        ]
-                    )
-
-    # ---------------- General Ledger ----------------
-    with tab4:
-        st.markdown("### General Ledger – Summarised by Account (per Currency)")
-
-        # Reuse journal dataframe if possible
-        if 'jdf' not in locals() or jdf.empty:
-            try:
-                with connect() as conn:
-                    jdf = pd.read_sql_query(
-                        """
-                        SELECT
-                            vl.id,
-                            vl.voucher_id,
-                            vl.line_no,
-                            vl.description,
-                            vl.account_name,
-                            vl.amount,
-                            vl.vat_percent,
-                            vl.wht_percent,
-                            vl.vat_value,
-                            vl.wht_value,
-                            vl.total,
-                            v.voucher_number,
-                            v.vendor,
-                            v.requester,
-                            v.invoice_ref,
-                            v.currency,
-                            v.status,
-                            v.created_at
-                        FROM voucher_lines vl
-                        JOIN vouchers v
-                          ON v.id = vl.voucher_id
-                        WHERE v.company_id = %s
-                        """,
-                        conn,
-                        params=(company_id,),
-                    )
-            except Exception as e:
-                jdf = pd.DataFrame()
-                st.error(f"Error loading ledger data: {e}")
-
-        if jdf.empty:
-            st.info("No data for general ledger yet.")
-        else:
-            # Aggregate by account + currency
-            agg = (
-                jdf.groupby(["currency", "account_name"], dropna=False)[
-                    ["amount", "vat_value", "wht_value", "total"]
-                ]
-                .sum()
-                .reset_index()
+            # Linked vouchers: match on invoice_ref
+            linked_vouchers = (
+                vdf_latest[vdf_latest["invoice_ref"] == inv_num]
+                if not vdf_latest.empty
+                else pd.DataFrame()
             )
 
-            for cur in sorted(agg["currency"].dropna().unique().tolist()):
-                st.markdown(f"#### Currency: {cur}")
-                sub = agg[agg["currency"] == cur].copy()
-                sub = sub.sort_values("account_name")
-                st.dataframe(sub)
+            paid_gross = 0.0
+            paid_payable = 0.0
+            v_count = 0
 
-    # ---------------- Trial Balance ----------------
-    with tab5:
-        st.markdown("### Trial Balance – by Currency")
+            for _, v in linked_vouchers.iterrows():
+                v_id = int(v["id"])
+                v_count += 1
+                lines = get_lines_for_voucher(v_id)
+                if lines.empty:
+                    continue
 
-        # Bring in chart of accounts to know type / grouping
-        accounts_df = pd.DataFrame(list_accounts(company_id=company_id))
-        if accounts_df.empty:
-            st.info("No accounts defined yet – trial balance not available.")
-        else:
-            # Ensure we have a ledger aggregate to work from
+                # Gross = amount + VAT + WHT
+                v_gross = float(
+                    (lines["amount"] + lines["vat_value"] + lines["wht_value"]).sum()
+                )
+                # Payable = amount + VAT - WHT
+                v_payable_sum = float(
+                    (lines["amount"] + lines["vat_value"] - lines["wht_value"]).sum()
+                )
+
+                paid_gross += v_gross
+                paid_payable += v_payable_sum
+
+            remaining_gross = max(0.0, gross - paid_gross)
+            remaining_payable = max(0.0, payable - paid_payable)
+            status = (
+                "Fully Paid"
+                if remaining_gross <= 1e-6
+                else ("Partially Paid" if paid_gross > 0 else "Unpaid")
+            )
+
+            invoice_rows.append(
+                {
+                    "Invoice No": inv_num,
+                    "Vendor": inv.get("vendor", ""),
+                    "Currency": inv.get("currency", "NGN"),
+                    "Vendor Inv No": inv.get("vendor_invoice_number", ""),
+                    "Summary": inv.get("summary", ""),
+                    "VAT Rate %": float(inv.get("vat_rate", 0.0)),
+                    "WHT Rate %": float(inv.get("wht_rate", 0.0)),
+                    "Vatable": vatable,
+                    "VAT": vat_amt,
+                    "WHT": wht_amt,
+                    "Non-Vatable": non_vatable,
+                    "Total Payable (Invoice)": payable,
+                    "Gross Invoice": gross,
+                    "Paid (Gross)": paid_gross,
+                    "Paid (Payable)": paid_payable,
+                    "Remaining (Gross)": remaining_gross,
+                    "Remaining (Payable)": remaining_payable,
+                    "Voucher Count": v_count,
+                    "Payable Account": inv.get("payable_account", "Accounts Payable"),
+                    "Expense/Asset Account": inv.get("expense_asset_account", "Expense"),
+                    "Terms": inv.get("terms", ""),
+                    "Last Modified": inv.get("last_modified", ""),
+                    "Status": status,
+                }
+            )
+
+    df_invoices = pd.DataFrame(invoice_rows)
+
+    # Ensure Currency exists
+    if not df_invoices.empty and "Currency" not in df_invoices.columns:
+        df_invoices["Currency"] = "NGN"
+
+    if not df_invoices.empty:
+        df_invoices["Currency"] = df_invoices["Currency"].fillna("NGN").str.upper()
+
+        df_invoices_ngn = df_invoices[df_invoices["Currency"] == "NGN"]
+        df_invoices_fx = df_invoices[df_invoices["Currency"] != "NGN"]
+    else:
+        df_invoices_ngn = pd.DataFrame()
+        df_invoices_fx = pd.DataFrame()
+
+    # ===================== VOUCHER SUMMARY =====================
+    voucher_rows: List[Dict[str, Any]] = []
+    voucher_currency_cache: Dict[int, str] = {}
+
+    if not vdf_latest.empty:
+        for _, v in vdf_latest.iterrows():
+            vid = int(v["id"])
+
+            # Derive currency from linked invoice (if any) or fallback to voucher's currency or NGN
+            v_currency = (v.get("currency") or "NGN")
             try:
-                with connect() as conn:
-                    jdf_tb = pd.read_sql_query(
-                        """
-                        SELECT
-                            vl.id,
-                            vl.voucher_id,
-                            vl.line_no,
-                            vl.account_name,
-                            vl.total,
-                            v.currency
-                        FROM voucher_lines vl
-                        JOIN vouchers v
-                          ON v.id = vl.voucher_id
-                        WHERE v.company_id = %s
-                        """,
-                        conn,
-                        params=(company_id,),
-                    )
-            except Exception as e:
-                jdf_tb = pd.DataFrame()
-                st.error(f"Error loading data for trial balance: {e}")
+                inv_ref = v.get("invoice_ref")
+                if isinstance(inv_ref, str) and not idf_latest.empty:
+                    inv_match = idf_latest[idf_latest["invoice_number"] == inv_ref]
+                    if not inv_match.empty:
+                        inv_row = inv_match.iloc[0]
+                        v_currency = (inv_row.get("currency") or v_currency or "NGN")
+            except Exception:
+                v_currency = v_currency or "NGN"
 
-            if jdf_tb.empty:
-                st.info("No postings yet – trial balance is empty.")
+            voucher_currency_cache[vid] = v_currency or "NGN"
+
+            lines = get_lines_for_voucher(vid)
+            if lines.empty:
+                v_payable = 0.0
+                v_gross = 0.0
             else:
-                # Map account_name in lines to account type via accounts.name
-                accounts_df = accounts_df.rename(
-                    columns={
-                        "name": "account_name",
-                        "type": "account_type",
+                v_payable = float(
+                    (lines["amount"] + lines["vat_value"] - lines["wht_value"]).sum()
+                )
+                v_gross = float(
+                    (lines["amount"] + lines["vat_value"] + lines["wht_value"]).sum()
+                )
+
+            voucher_rows.append(
+                {
+                    "Voucher No": v.get("voucher_number") or f"V{vid}",
+                    "Voucher Id": vid,
+                    "Parent Id": int(v.get("parent_id") or 0),
+                    "Version": int(v.get("version") or 1),
+                    "Vendor": v.get("vendor", ""),
+                    "Requester": v.get("requester", ""),
+                    "Linked Invoice": v.get("invoice_ref") or "",
+                    "Voucher Status": v.get("status", ""),
+                    "Currency": v_currency,
+                    "Payable (Voucher)": v_payable,
+                    "Gross (Voucher)": v_gross,
+                    "Last Modified": v.get("last_modified", ""),
+                }
+            )
+
+    df_vouchers = pd.DataFrame(voucher_rows)
+
+    # ===================== LINE ITEMS =====================
+    line_rows: List[Dict[str, Any]] = []
+
+    if not vdf_latest.empty:
+        for _, v in vdf_latest.iterrows():
+            vid = int(v["id"])
+            lines = get_lines_for_voucher(vid)
+            if lines.empty:
+                continue
+            v_currency = voucher_currency_cache.get(vid, "NGN")
+            vnum = v.get("voucher_number") or f"V{vid}"
+            inv_ref = v.get("invoice_ref") or ""
+            for _, ln in lines.iterrows():
+                line_rows.append(
+                    {
+                        "Voucher No": vnum,
+                        "Linked Invoice": inv_ref,
+                        "Currency": v_currency,
+                        "Description": ln.get("description", ""),
+                        "Amount": float(ln.get("amount", 0.0)),
+                        "Expense/Asset Account": ln.get("account_name", ""),
+                        "VAT %": float(ln.get("vat_percent", 0.0)),
+                        "WHT %": float(ln.get("wht_percent", 0.0)),
+                        "VAT Value": float(ln.get("vat_value", 0.0)),
+                        "WHT Value": float(ln.get("wht_value", 0.0)),
+                        "Line Total (Payable)": float(ln.get("total", 0.0)),
                     }
                 )
-                merged = jdf_tb.merge(
-                    accounts_df[["account_name", "account_type"]],
-                    on="account_name",
-                    how="left",
+
+    df_lines = pd.DataFrame(line_rows)
+
+    # ===================== GENERAL JOURNAL =====================
+    journal_rows: List[Dict[str, Any]] = []
+
+    # Invoices DR/CR
+    if not idf_latest.empty:
+        for _, inv in idf_latest.iterrows():
+            inv_num = inv["invoice_number"]
+            summary = inv.get("summary", "")
+            inv_currency = (inv.get("currency") or "NGN")
+
+            vatable = float(inv.get("vatable_amount", 0.0))
+            non_vatable = float(inv.get("non_vatable_amount", 0.0))
+            vat_amt = float(inv.get("vat_amount", 0.0))
+
+            pay_acc = inv.get("payable_account") or "Accounts Payable"
+            exp_asset_acc = inv.get("expense_asset_account") or "Expense"
+
+            invoice_drcr_total = vatable + non_vatable + vat_amt
+
+            if invoice_drcr_total > 0:
+                # DR Expense/Asset
+                journal_rows.append(
+                    {
+                        "Date": inv.get("last_modified", ""),
+                        "Type": "INVOICE",
+                        "Invoice No": inv_num,
+                        "Voucher No": "",
+                        "Description": f"{summary} (DR exp/asset actual+VAT+non-vatable)",
+                        "Currency": inv_currency,
+                        "DR Account": exp_asset_acc,
+                        "DR Amount": invoice_drcr_total,
+                        "CR Account": "",
+                        "CR Amount": 0.0,
+                    }
+                )
+                # CR Accounts Payable
+                journal_rows.append(
+                    {
+                        "Date": inv.get("last_modified", ""),
+                        "Type": "INVOICE",
+                        "Invoice No": inv_num,
+                        "Voucher No": "",
+                        "Description": f"{summary} (CR accounts payable)",
+                        "Currency": inv_currency,
+                        "DR Account": "",
+                        "DR Amount": 0.0,
+                        "CR Account": pay_acc,
+                        "CR Amount": invoice_drcr_total,
+                    }
                 )
 
-                # Aggregate by currency, account_type, account_name
-                tb = (
-                    merged.groupby(
-                        ["currency", "account_type", "account_name"], dropna=False
-                    )["total"]
-                    .sum()
-                    .reset_index()
-                )
+    # Vouchers postings
+    if not vdf_latest.empty:
+        for _, v in vdf_latest.iterrows():
+            vnum = v.get("voucher_number") or f"V{v['id']}"
+            lines = get_lines_for_voucher(int(v["id"]))
+            if lines.empty:
+                continue
 
-                for cur in sorted(tb["currency"].dropna().unique().tolist()):
-                    st.markdown(f"#### Currency: {cur}")
-                    sub = tb[tb["currency"] == cur].copy()
-                    sub = sub.sort_values(["account_type", "account_name"])
-                    st.dataframe(sub)
+            linked_inv = None
+            inv_ref = v.get("invoice_ref")
+            if inv_ref and not idf_latest.empty:
+                inv_match = idf_latest[idf_latest["invoice_number"] == inv_ref]
+                if not inv_match.empty:
+                    linked_inv = inv_match.iloc[0]
 
-    # ---------------- CRM / Master Data ----------------
-    with tab6:
-        st.markdown("### CRM / Master Data")
+            if linked_inv is not None:
+                pay_acc = linked_inv.get("payable_account") or "Accounts Payable"
+                inv_num = linked_inv["invoice_number"]
+                v_currency = (linked_inv.get("currency") or "NGN")
+                for _, ln in lines.iterrows():
+                    amt = float(ln.get("amount", 0.0))
+                    vat_val = float(ln.get("vat_value", 0.0))
+                    wht_val = float(ln.get("wht_value", 0.0))
+                    total_no_wht = amt + vat_val
+                    if total_no_wht > 0:
+                        # DR Payable (amt+vat)
+                        journal_rows.append(
+                            {
+                                "Date": v.get("last_modified", ""),
+                                "Type": "VOUCHER",
+                                "Invoice No": inv_num,
+                                "Voucher No": vnum,
+                                "Description": f"{ln.get('description','')} (DR payable, amt+vat)",
+                                "Currency": v_currency,
+                                "DR Account": pay_acc,
+                                "DR Amount": total_no_wht,
+                                "CR Account": "",
+                                "CR Amount": 0.0,
+                            }
+                        )
+                        # CR Suspense (amt+vat)
+                        journal_rows.append(
+                            {
+                                "Date": v.get("last_modified", ""),
+                                "Type": "VOUCHER",
+                                "Invoice No": inv_num,
+                                "Voucher No": vnum,
+                                "Description": f"{ln.get('description','')} (CR suspense, amt+vat)",
+                                "Currency": v_currency,
+                                "DR Account": "",
+                                "DR Amount": 0.0,
+                                "CR Account": "Suspense Account",
+                                "CR Amount": total_no_wht,
+                            }
+                        )
+                    if wht_val > 0:
+                        # DR Payable (WHT)
+                        journal_rows.append(
+                            {
+                                "Date": v.get("last_modified", ""),
+                                "Type": "VOUCHER",
+                                "Invoice No": inv_num,
+                                "Voucher No": vnum,
+                                "Description": f"{ln.get('description','')} (DR payable WHT)",
+                                "Currency": v_currency,
+                                "DR Account": pay_acc,
+                                "DR Amount": wht_val,
+                                "CR Account": "",
+                                "CR Amount": 0.0,
+                            }
+                        )
+                        # CR WHT Payable
+                        journal_rows.append(
+                            {
+                                "Date": v.get("last_modified", ""),
+                                "Type": "VOUCHER",
+                                "Invoice No": inv_num,
+                                "Voucher No": vnum,
+                                "Description": f"{ln.get('description','')} (CR WHT payable)",
+                                "Currency": v_currency,
+                                "DR Account": "",
+                                "DR Amount": 0.0,
+                                "CR Account": "WHT Payable",
+                                "CR Amount": wht_val,
+                            }
+                        )
+            else:
+                # Voucher not linked to invoice – DR expense/asset, CR suspense
+                v_currency = voucher_currency_cache.get(int(v["id"]), "NGN")
+                for _, ln in lines.iterrows():
+                    amt = float(ln.get("amount", 0.0))
+                    vat_val = float(ln.get("vat_value", 0.0))
+                    wht_val = float(ln.get("wht_value", 0.0))
+                    line_payable = amt + vat_val - wht_val
+                    if line_payable <= 0:
+                        continue
+                    journal_rows.append(
+                        {
+                            "Date": v.get("last_modified", ""),
+                            "Type": "VOUCHER",
+                            "Invoice No": "",
+                            "Voucher No": vnum,
+                            "Description": f"{ln.get('description','')} (DR exp/asset)",
+                            "Currency": v_currency,
+                            "DR Account": ln.get("account_name", ""),
+                            "DR Amount": line_payable,
+                            "CR Account": "",
+                            "CR Amount": 0.0,
+                        }
+                    )
+                    journal_rows.append(
+                        {
+                            "Date": v.get("last_modified", ""),
+                            "Type": "VOUCHER",
+                            "Invoice No": "",
+                            "Voucher No": vnum,
+                            "Description": f"{ln.get('description','')} (CR suspense)",
+                            "Currency": v_currency,
+                            "DR Account": "",
+                            "DR Amount": 0.0,
+                            "CR Account": "Suspense Account",
+                            "CR Amount": line_payable,
+                        }
+                    )
 
-        st.markdown("#### Vendors")
-        vdf = pd.DataFrame(list_vendors(company_id=company_id))
-        if vdf.empty:
-            st.info("No vendors yet.")
+    df_journal = pd.DataFrame(journal_rows)
+
+    # ===================== RENDER SECTIONS =====================
+    # Invoice Summary
+    st.markdown("<div class='card'><div class='card-header'>🧾 Invoice Summary</div>", unsafe_allow_html=True)
+    if not df_invoices.empty:
+        # NGN-only
+        if not df_invoices_ngn.empty:
+            st.markdown("**Invoices (NGN Only)**")
+            st.dataframe(
+                df_invoices_ngn.style.format(
+                    {
+                        "Vatable": "{:,.2f}",
+                        "VAT": "{:,.2f}",
+                        "WHT": "{:,.2f}",
+                        "Non-Vatable": "{:,.2f}",
+                        "Total Payable (Invoice)": "{:,.2f}",
+                        "Gross Invoice": "{:,.2f}",
+                        "Paid (Gross)": "{:,.2f}",
+                        "Paid (Payable)": "{:,.2f}",
+                        "Remaining (Gross)": "{:,.2f}",
+                        "Remaining (Payable)": "{:,.2f}",
+                    }
+                ),
+                use_container_width=True,
+            )
         else:
-            st.dataframe(vdf)
+            st.info("No NGN invoices yet.")
 
-        st.markdown("#### Staff")
-        sdf = pd.DataFrame(list_staff(company_id=company_id))
-        if sdf.empty:
-            st.info("No staff yet.")
+        # Multi-currency
+        if not df_invoices_fx.empty:
+            st.markdown("**Invoices (Multi-Currency – Non-NGN)**")
+            st.dataframe(
+                df_invoices_fx.style.format(
+                    {
+                        "Vatable": "{:,.2f}",
+                        "VAT": "{:,.2f}",
+                        "WHT": "{:,.2f}",
+                        "Non-Vatable": "{:,.2f}",
+                        "Total Payable (Invoice)": "{:,.2f}",
+                        "Gross Invoice": "{:,.2f}",
+                        "Paid (Gross)": "{:,.2f}",
+                        "Paid (Payable)": "{:,.2f}",
+                        "Remaining (Gross)": "{:,.2f}",
+                        "Remaining (Payable)": "{:,.2f}",
+                    }
+                ),
+                use_container_width=True,
+            )
         else:
-            st.dataframe(sdf)
+            st.info("No non-NGN (multi-currency) invoices yet.")
 
-        st.markdown("#### Accounts (Chart of Accounts)")
-        adf = pd.DataFrame(list_accounts(company_id=company_id))
-        if adf.empty:
-            st.info("No accounts yet.")
-        else:
-            st.dataframe(adf)
+        # Totals by Currency
+        currency_summary = (
+            df_invoices.groupby("Currency")[
+                [
+                    "Vatable",
+                    "VAT",
+                    "WHT",
+                    "Non-Vatable",
+                    "Total Payable (Invoice)",
+                    "Gross Invoice",
+                    "Paid (Gross)",
+                    "Paid (Payable)",
+                    "Remaining (Gross)",
+                    "Remaining (Payable)",
+                ]
+            ]
+            .sum()
+            .reset_index()
+        )
+        st.markdown("**Totals by Currency (All Invoices)**")
+        st.dataframe(currency_summary, use_container_width=True)
+    else:
+        st.info("No invoices yet.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-# -------------------
+    # Voucher Summary
+    st.markdown("<div class='card'><div class='card-header'>📑 Voucher Summary</div>", unsafe_allow_html=True)
+    if not df_vouchers.empty:
+        st.dataframe(
+            df_vouchers.style.format(
+                {
+                    "Payable (Voucher)": "{:,.2f}",
+                    "Gross (Voucher)": "{:,.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info("No vouchers yet.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Line Items
+    st.markdown("<div class='card'><div class='card-header'>🧰 Line Items (All)</div>", unsafe_allow_html=True)
+    if not df_lines.empty:
+        st.dataframe(
+            df_lines.style.format(
+                {
+                    "Amount": "{:,.2f}",
+                    "VAT Value": "{:,.2f}",
+                    "WHT Value": "{:,.2f}",
+                    "Line Total (Payable)": "{:,.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info("No line items yet.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # General Journal
+    st.markdown("<div class='card'><div class='card-header'>📚 General Journal (Linked DR / CR)</div>", unsafe_allow_html=True)
+    if not df_journal.empty:
+        st.dataframe(
+            df_journal.style.format(
+                {
+                    "DR Amount": "{:,.2f}",
+                    "CR Amount": "{:,.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info("No journal entries yet.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Audit log + Excel export
+    with closing(connect()) as conn:
+        df_audit = pd.read_sql_query(
+            "SELECT ts AS Timestamp, user AS User, action AS Action, entity AS Entity, ref AS Reference, details AS Details FROM audit_log ORDER BY id DESC",
+            conn,
+        )
+
+    st.markdown(
+        excel_download_link_multi(df_invoices, df_vouchers, df_lines, df_journal, df_audit),
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 def app_user_management():
     require_permission("can_manage_users")
@@ -2360,3 +2316,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
