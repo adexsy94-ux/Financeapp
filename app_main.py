@@ -58,6 +58,27 @@ from invoices_module import (
 from pdf_utils import build_voucher_pdf_bytes
 
 
+# ========= CACHED DATA HELPERS (Performance) =========
+@st.cache_data(ttl=60)
+def get_latest_vouchers_df(company_id: int) -> pd.DataFrame:
+    """Cached vouchers for reports and other tabs."""
+    return pd.DataFrame(list_vouchers(company_id=company_id))
+
+
+@st.cache_data(ttl=60)
+def get_latest_invoices_df(company_id: int) -> pd.DataFrame:
+    """Cached invoices for reports and other tabs."""
+    return pd.DataFrame(list_invoices(company_id=company_id))
+
+
+@st.cache_data(ttl=60)
+def get_lines_for_voucher_cached(company_id: int, voucher_id: int) -> pd.DataFrame:
+    """Cached voucher lines – avoid hitting DB in a tight loop."""
+    lines = list_voucher_lines(company_id, voucher_id)
+    return pd.DataFrame(lines) if lines else pd.DataFrame()
+
+
+
 # ------------------------
 # Helpers
 # ------------------------
@@ -592,7 +613,7 @@ def render_all_invoices_tab() -> None:
         unsafe_allow_html=True,
     )
 
-    invoices = list_invoices(company_id)
+    invoices = list(get_latest_invoices_df(company_id).to_dict(orient="records"))
     if not invoices:
         st.info("No invoices yet.")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1570,18 +1591,17 @@ def app_reports():
         unsafe_allow_html=True,
     )
 
-    # --- Fetch latest vouchers & invoices for this company ---
-    vdf_raw = pd.DataFrame(list_vouchers(company_id=company_id))
-    idf_raw = pd.DataFrame(list_invoices(company_id=company_id))
+    # --- Fetch latest vouchers & invoices for this company (cached) ---
+    vdf_raw = get_latest_vouchers_df(company_id)
+    idf_raw = get_latest_invoices_df(company_id)
 
     # For now we treat all rows as "latest" – versioning can be added later if needed
     vdf_latest = vdf_raw.copy()
     idf_latest = idf_raw.copy()
 
-    # Helper: lines for a voucher as DataFrame
+    # Helper: lines for a voucher as DataFrame (cached)
     def get_lines_for_voucher(voucher_id: int) -> pd.DataFrame:
-        lines = list_voucher_lines(company_id, voucher_id)
-        return pd.DataFrame(lines) if lines else pd.DataFrame()
+        return get_lines_for_voucher_cached(company_id, voucher_id)
 
     # ===================== INVOICE SUMMARY =====================
     invoice_rows: List[Dict[str, Any]] = []
@@ -2071,10 +2091,19 @@ def app_reports():
             conn,
         )
 
-    st.markdown(
-        excel_download_link_multi(df_invoices, df_vouchers, df_lines, df_journal, df_audit),
-        unsafe_allow_html=True,
-    )
+    if st.button("📥 Generate Excel file for all reports"):
+        st.markdown(
+            excel_download_link_multi(
+                df_invoices,
+                df_vouchers,
+                df_lines,
+                df_journal,
+                df_audit,
+            ),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("Click the button above to build and download the Excel report.")
     st.markdown("</div>", unsafe_allow_html=True)
 
 def app_user_management():
