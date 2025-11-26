@@ -21,8 +21,6 @@ build_voucher_pdf_bytes supports BOTH call styles:
   2) NEW STYLE (simple DB-based):
         pdf_bytes = build_voucher_pdf_bytes(company_id, voucher_id)
         pdf_bytes = build_voucher_pdf_bytes(company_id=..., voucher_id=...)
-
-So your existing calls will NOT break with "missing line_rows".
 """
 
 import base64
@@ -35,6 +33,24 @@ import pandas as pd
 import streamlit as st
 
 from db_config import connect
+
+# ----------------------------------------------------------------------
+# Optional PDF rendering libs for attachments
+# ----------------------------------------------------------------------
+
+# 1) PyMuPDF (preferred)
+try:
+    import fitz  # type: ignore
+    PYMUPDF_OK = True
+except Exception:
+    PYMUPDF_OK = False
+
+# 2) pdf2image fallback
+try:
+    from pdf2image import convert_from_bytes  # type: ignore
+    PDF2IMAGE_OK = True
+except Exception:
+    PDF2IMAGE_OK = False
 
 
 # ======================= GENERAL HELPERS =======================
@@ -154,11 +170,7 @@ def excel_download_link_multi(
     df_audit: pd.DataFrame,
     filename: str = "VoucherPro_Report",
 ) -> str:
-    """Build a single Excel file (.xlsx) with multiple sheets.
-
-    IMPORTANT: uses engine="openpyxl" (NO xlsxwriter needed).
-    This removes your ModuleNotFoundError: No module named 'xlsxwriter'.
-    """
+    """Build a single Excel file (.xlsx) with multiple sheets using openpyxl (no xlsxwriter)."""
     df_invoices = _strip_tz(df_invoices)
     df_vouchers = _strip_tz(df_vouchers)
     df_lines = _strip_tz(df_lines)
@@ -225,8 +237,8 @@ def _fetch_voucher_lines(company_id: int, voucher_id: int) -> List[Dict[str, Any
 def _fetch_main_voucher_attachment(voucher_id: int) -> Optional[Tuple[str, bytes]]:
     """Fetch the most recent attachment for this voucher (if any).
 
-    NOTE: your current DB error says voucher_documents has NO company_id column.
-    So this SELECT deliberately does NOT use company_id – it only filters by voucher_id.
+    NOTE: your current DB error said voucher_documents has NO company_id column.
+    So this SELECT deliberately does NOT use company_id – only voucher_id.
     """
     with closing(connect()) as conn, closing(conn.cursor()) as cur:
         try:
@@ -248,7 +260,27 @@ def _fetch_main_voucher_attachment(voucher_id: int) -> Optional[Tuple[str, bytes
     return row[0], row[1]
 
 
-# ======================= AMOUNT TO WORDS =======================
+# ======================= MONEY + AMOUNT TO WORDS =======================
+
+def money(amount: float, currency: str = "NGN") -> str:
+    """Format amount with currency symbol/code (used for PDF)."""
+    cur = (currency or "NGN").upper()
+    if cur == "NGN":
+        prefix = "₦"
+    elif cur == "USD":
+        prefix = "$"
+    elif cur == "GBP":
+        prefix = "£"
+    elif cur == "EUR":
+        prefix = "€"
+    else:
+        prefix = cur + " "
+    try:
+        amt = float(amount)
+    except Exception:
+        amt = 0.0
+    return f"{prefix}{amt:,.2f}"
+
 
 ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
 TEENS = [
@@ -305,6 +337,7 @@ def _int_to_words(n: int) -> str:
 
 
 def amount_to_words(amount: float, currency: str = "NGN") -> str:
+    """Convert a numeric amount to words with currency names."""
     try:
         amt = round(float(amount) + 1e-9, 2)
     except Exception:
@@ -335,9 +368,68 @@ def amount_to_words(amount: float, currency: str = "NGN") -> str:
         return f"{words} {major_name} only."
 
 
+# ======================= ATTACHMENT HELPERS =======================
+
+def _render_pdf_pages_to_pngs(file_bytes: bytes, max_pages: int = 4, dpi: int = 150) -> List[bytes]:
+    """
+    Try PyMuPDF first; if unavailable, try pdf2image.
+    Returns a list of PNG bytes for up to max_pages pages.
+    """
+    images: List[bytes] = []
+
+    if PYMUPDF_OK:
+        try:
+            doc = fitz.open(stream=file_bytes, filetype="pdf")  # type: ignore
+            count = min(max_pages, len(doc))
+            for i in range(count):
+                page = doc.load_page(i)
+                zoom = dpi / 72.0
+                mat = fitz.Matrix(zoom, zoom)  # type: ignore
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                images.append(pix.tobytes("png"))
+            return images
+        except Exception:
+            pass
+
+    if PDF2IMAGE_OK:
+        try:
+            pil_imgs = convert_from_bytes(file_bytes, dpi=dpi, fmt="png")  # type: ignore
+            for img in pil_imgs[:max_pages]:
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                images.append(buf.getvalue())
+            return images
+        except Exception:
+            pass
+
+    return images  # empty if neither works
+
+
+def _normalize_to_pages(file_name: Optional[str], file_bytes: Optional[bytes]) -> List[bytes]:
+    """
+    Returns up to 4 PNG bytes representing pages 1..4.
+    For JPG/PNG uploads: returns one image (page 1); remaining slots omitted.
+    For PDFs: returns rendered pages (requires PyMuPDF or pdf2image).
+    """
+    if not file_bytes or not file_name:
+        return []
+
+    lower = file_name.lower()
+    if lower.endswith(".pdf"):
+        return _render_pdf_pages_to_pngs(file_bytes, max_pages=4, dpi=160)
+
+    # image types
+    if lower.endswith((".jpg", ".jpeg", ".png")):
+        return [file_bytes]  # single "page"
+    return []
+
+
 # ======================= VOUCHER PDF CORE =======================
 
 def _clean_currency_text(text: Any) -> str:
+    """
+    Replace '₦' with 'NGN ' for fonts that don't support the naira symbol.
+    """
     try:
         s = str(text if text is not None else "")
     except Exception:
@@ -394,6 +486,7 @@ def _build_voucher_pdf_from_struct(
         Table,
         TableStyle,
         PageBreak,
+        Image,
     )
 
     fonts = _register_fonts()
@@ -409,6 +502,9 @@ def _build_voucher_pdf_from_struct(
         bottomMargin=4 * mm,
     )
 
+    content_w = doc.width
+    content_h = doc.height - (doc.topMargin + doc.bottomMargin)
+
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="HeadBig", fontName=fonts["bold"], fontSize=13, leading=16, alignment=1))
     styles.add(ParagraphStyle(name="HeadBold", fontName=fonts["bold"], fontSize=12, leading=14))
@@ -423,6 +519,8 @@ def _build_voucher_pdf_from_struct(
     tin = settings.get("tin") or ""
     right_parts = [rc, tin] + addr_lines
     right_block = "<br/>".join([p for p in right_parts if p])
+
+    from reportlab.platypus import Table  # already imported above but to keep linters happy
 
     top_table = Table(
         [
@@ -540,6 +638,7 @@ def _build_voucher_pdf_from_struct(
             ]
         )
 
+    # pad to at least 10 rows
     while len(rows) < 10:
         rows.append(["", "", "", "", "", ""])
 
@@ -556,7 +655,7 @@ def _build_voucher_pdf_from_struct(
 
     line_table = Table(
         rows,
-        colWidths=[140, 300, 70, 70, 70, doc.width - 140 - 300 - 70 - 70 - 70],
+        colWidths=[140, 300, 70, 70, 70, content_w - 140 - 300 - 70 - 70 - 70],
     )
     line_table.setStyle(
         TableStyle(
@@ -595,7 +694,7 @@ def _build_voucher_pdf_from_struct(
     ]
     sig_table = Table(
         sig_rows,
-        colWidths=[120, 360, 120, doc.width - 120 - 360 - 120],
+        colWidths=[120, 360, 120, content_w - 120 - 360 - 120],
     )
     sig_table.setStyle(
         TableStyle(
@@ -613,18 +712,64 @@ def _build_voucher_pdf_from_struct(
     )
     story.append(sig_table)
 
-    # Simple placeholder page for attachment (we just mention it was stored)
-    if attachment and attachment[0] and attachment[1]:
-        story.append(PageBreak())
-        story.append(
-            Paragraph(
-                f"Attached document stored in the system: {attachment[0]}",
-                styles["Small"],
-            )
-        )
+    # Attachments → convert to pages and append up to 4 pages
+    page_imgs: List[bytes] = []
+    if attachment:
+        try:
+            # Single (name, bytes) tuple
+            att_name, att_bytes = attachment
+            if att_name and att_bytes:
+                page_imgs = _normalize_to_pages(att_name, att_bytes)[:4]
+        except Exception:
+            page_imgs = []
+
+    if page_imgs:
+        avail_w = content_w
+        # small headroom
+        avail_h = content_h - 12
+
+        for img_bytes in page_imgs:
+            story.append(PageBreak())
+            img = _scaled_image_flowable(img_bytes, max_w=avail_w, max_h=avail_h)
+            story.append(img)
 
     doc.build(story)
     return buffer.getvalue()
+
+
+def _scaled_image_flowable(img_bytes: bytes, max_w: float, max_h: float):
+    """
+    Scale an image to fit within max_w x max_h (points), preserving aspect ratio.
+    Adds a small safety margin to avoid rare 0.1pt rounding overflows that cause LayoutError.
+    """
+    from reportlab.platypus import Image
+
+    safety = 2.0  # points
+    max_w_eff = max(1.0, max_w - safety)
+    max_h_eff = max(1.0, max_h - safety)
+
+    img = Image(BytesIO(img_bytes))
+    iw, ih = img.drawWidth, img.drawHeight
+
+    if iw <= 0 or ih <= 0:
+        return img
+
+    scale_w = max_w_eff / iw
+    scale_h = max_h_eff / ih
+    scale = min(scale_w, scale_h, 1.0)  # never upscale
+
+    dw = iw * scale
+    dh = ih * scale
+
+    if dw > max_w_eff:
+        dw = max_w_eff
+    if dh > max_h_eff:
+        dh = max_h_eff
+
+    img.drawWidth = dw
+    img.drawHeight = dh
+    img.hAlign = "CENTER"
+    return img
 
 
 # ======================= PUBLIC WRAPPER =======================
@@ -681,7 +826,7 @@ def build_voucher_pdf_bytes(*args, **kwargs) -> bytes:
     if "line_rows" in kwargs:
         line_rows = kwargs["line_rows"]
     else:
-        # THIS is where we avoid your 'missing line_rows' crash:
+        # THIS avoids your 'missing line_rows' crash:
         line_rows = args[2] if len(args) >= 3 else []
 
     if "attachment" in kwargs:
@@ -698,7 +843,13 @@ def _build_from_db_struct(
     lines: List[Dict[str, Any]],
     attachment: Optional[Tuple[str, bytes]],
 ) -> bytes:
-    """Convert DB rows into the struct expected by _build_voucher_pdf_from_struct."""
+    """Convert DB rows into the struct expected by _build_voucher_pdf_from_struct.
+
+    Here we also:
+      - compute total payable
+      - format amount_str with currency (so PDF shows currency)
+      - propagate currency to lines if needed
+    """
 
     # Date
     date_val = (
@@ -727,11 +878,12 @@ def _build_from_db_struct(
             total_payable = 0.0
 
     currency = voucher.get("currency") or "NGN"
+    amount_str = money(total_payable, currency)  # <<< CURRENCY SHOWN HERE
 
     voucher_meta: Dict[str, Any] = {
         "voucher_number": voucher.get("voucher_number") or f"V{voucher.get('id')}",
         "date_str": date_str,
-        "amount_str": f"{total_payable:,.2f}",
+        "amount_str": amount_str,
         "requested_by": voucher.get("requester") or "",
         "department": voucher.get("department") or "",
         "payable_to": voucher.get("vendor") or "",
@@ -764,10 +916,10 @@ def _build_from_db_struct(
                 "vat": vat,
                 "wht": wht,
                 "total": total,
-                "amount_str": f"{amt:,.2f}",
-                "vat_str": f"{vat:,.2f}",
-                "wht_str": f"{wht:,.2f}" if wht else "-",
-                "payable_str": f"{total:,.2f}",
+                "amount_str": money(amt, currency),
+                "vat_str": money(vat, currency) if vat else "0.00",
+                "wht_str": money(wht, currency) if wht else "-",
+                "payable_str": money(total, currency),
             }
         )
 
