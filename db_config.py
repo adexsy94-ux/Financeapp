@@ -14,26 +14,24 @@ from psycopg2.extras import DictCursor
 
 def get_db_dsn() -> str:
     """
-    Resolve the PostgreSQL DSN.
+    Resolve the database DSN from environment variables or Streamlit secrets.
 
     Priority:
     1. st.secrets["DATABASE_URL"]  (Streamlit Cloud / local secrets.toml)
     2. Env vars: DATABASE_URL, DB_DSN, DB_URL, POSTGRES_DSN
     """
-    # 1) Try Streamlit secrets (if Streamlit is available)
+    # 1) Try Streamlit secrets if available (import lazily to avoid hard dependency)
     try:
-        import streamlit as st  # local import
+        import streamlit as st  # type: ignore
 
         if "DATABASE_URL" in st.secrets:
-            dsn = st.secrets["DATABASE_URL"]
-            if dsn:
-                return dsn
+            return st.secrets["DATABASE_URL"]
     except Exception:
-        # Either streamlit not installed yet or no secrets configured
         pass
 
-    # 2) Try environment variables
-    for name in ("DATABASE_URL", "DB_DSN", "DB_URL", "POSTGRES_DSN"):
+    # 2) Fallback to environment variables
+    candidates = ["DATABASE_URL", "DB_DSN", "DB_URL", "POSTGRES_DSN", "VOUCHER_DB_URL"]
+    for name in candidates:
         dsn = os.getenv(name)
         if dsn:
             return dsn
@@ -66,15 +64,11 @@ CREATE TABLE IF NOT EXISTS companies (
 AUTH_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     id                  SERIAL PRIMARY KEY,
-    username            TEXT NOT NULL,
+    username            TEXT NOT NULL UNIQUE,
     password_hash       TEXT NOT NULL,
-    company_id          INTEGER REFERENCES companies(id) ON DELETE CASCADE,
     role                TEXT NOT NULL DEFAULT 'user',
-    can_create_voucher  BOOLEAN NOT NULL DEFAULT FALSE,
-    can_approve_voucher BOOLEAN NOT NULL DEFAULT FALSE,
-    can_manage_users    BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (company_id, username)
+    company_id          INTEGER REFERENCES companies(id),
+    is_active           BOOLEAN NOT NULL DEFAULT TRUE
 );
 """
 
@@ -83,65 +77,67 @@ CREATE TABLE IF NOT EXISTS vendors (
     id              SERIAL PRIMARY KEY,
     company_id      INTEGER REFERENCES companies(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,
-    contact_person  TEXT,
+    email           TEXT,
+    phone           TEXT,
+    address         TEXT,
     bank_name       TEXT,
     bank_account    TEXT,
-    notes           TEXT,
-    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    tax_id          TEXT,
     UNIQUE (company_id, name)
 );
 """
 
 STAFF_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS staff (
-    id          SERIAL PRIMARY KEY,
-    company_id  INTEGER REFERENCES companies(id) ON DELETE CASCADE,
-    first_name  TEXT NOT NULL,
-    last_name   TEXT NOT NULL,
-    email       TEXT,
-    phone       TEXT,
-    status      TEXT,
-    position    TEXT,
-    created_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    id              SERIAL PRIMARY KEY,
+    company_id      INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    email           TEXT,
+    phone           TEXT,
+    address         TEXT,
+    status          TEXT,
+    position        TEXT
 );
 """
 
 ACCOUNTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS accounts (
-    id          SERIAL PRIMARY KEY,
-    company_id  INTEGER REFERENCES companies(id) ON DELETE CASCADE,
-    code        TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    type        TEXT NOT NULL,
-    created_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (company_id, code),
-    UNIQUE (company_id, name)
+    id              SERIAL PRIMARY KEY,
+    company_id      INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+    code            TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    type            TEXT NOT NULL,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    UNIQUE (company_id, code)
 );
 """
 
 VOUCHER_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS vouchers (
-    id              SERIAL PRIMARY KEY,
-    parent_id       INTEGER,
-    version         INTEGER NOT NULL DEFAULT 1,
-    company_id      INTEGER REFERENCES companies(id) ON DELETE CASCADE,
-
-    voucher_number  TEXT NOT NULL,
-    vendor          TEXT,
-    requester       TEXT,
-    invoice_ref     TEXT,
-
-    currency        TEXT NOT NULL DEFAULT 'NGN',
-    status          TEXT NOT NULL DEFAULT 'draft',
-
-    file_name       TEXT,
-    file_data       BYTEA,
-
-    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    last_modified   TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    approved_by     TEXT,
-    approved_at     TIMESTAMPTZ,
-
+    id                  SERIAL PRIMARY KEY,
+    parent_id           INTEGER,
+    version             INTEGER NOT NULL DEFAULT 1,
+    company_id          INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+    voucher_number      TEXT NOT NULL,
+    vendor              TEXT,
+    account_name        TEXT,
+    currency            TEXT NOT NULL DEFAULT 'NGN',
+    status              TEXT NOT NULL DEFAULT 'draft',
+    file_name           TEXT,
+    file_data           BYTEA,
+    created_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    last_modified       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    approved_by         TEXT,
+    approved_at         TIMESTAMPTZ,
+    requester           TEXT,
+    invoice_ref         TEXT,
+    total_amount        NUMERIC(18, 2) DEFAULT 0,
+    vatable_amount      NUMERIC(18, 2) DEFAULT 0,
+    vat_amount          NUMERIC(18, 2) DEFAULT 0,
+    non_vatable_amount  NUMERIC(18, 2) DEFAULT 0,
+    wht_amount          NUMERIC(18, 2) DEFAULT 0,
+    payable_amount      NUMERIC(18, 2) DEFAULT 0,
+    notes               TEXT,
     UNIQUE (company_id, voucher_number, version)
 );
 """
@@ -151,13 +147,11 @@ CREATE TABLE IF NOT EXISTS voucher_lines (
     id              SERIAL PRIMARY KEY,
     voucher_id      INTEGER REFERENCES vouchers(id) ON DELETE CASCADE,
     company_id      INTEGER REFERENCES companies(id) ON DELETE CASCADE,
-
     line_no         INTEGER,
     description     TEXT,
     amount          NUMERIC(18, 2),
-
+    account_code    TEXT,
     account_name    TEXT,
-
     vat_percent     NUMERIC(5, 2),
     wht_percent     NUMERIC(5, 2),
     vat_value       NUMERIC(18, 2),
@@ -185,31 +179,24 @@ CREATE TABLE IF NOT EXISTS invoices (
     parent_id               INTEGER,
     version                 INTEGER NOT NULL DEFAULT 1,
     company_id              INTEGER REFERENCES companies(id) ON DELETE CASCADE,
-
     invoice_number          TEXT NOT NULL,
-    vendor_invoice_number   TEXT,
-    vendor                  TEXT NOT NULL,
-    summary                 TEXT,
-
-    vatable_amount          NUMERIC(18, 2) NOT NULL DEFAULT 0,
-    non_vatable_amount      NUMERIC(18, 2) NOT NULL DEFAULT 0,
-    vat_rate                NUMERIC(5, 2)  NOT NULL DEFAULT 0,
-    wht_rate                NUMERIC(5, 2)  NOT NULL DEFAULT 0,
-
-    vat_amount              NUMERIC(18, 2) NOT NULL DEFAULT 0,
-    wht_amount              NUMERIC(18, 2) NOT NULL DEFAULT 0,
-    subtotal                NUMERIC(18, 2) NOT NULL DEFAULT 0,
-    total_amount            NUMERIC(18, 2) NOT NULL DEFAULT 0,
-
-    terms                   TEXT,
-    payable_account         TEXT,
-    expense_asset_account   TEXT,
+    customer_name           TEXT NOT NULL,
+    customer_email          TEXT,
+    customer_phone          TEXT,
+    customer_address        TEXT,
     currency                TEXT NOT NULL DEFAULT 'NGN',
-
-    file_name               TEXT,
-    file_data               BYTEA,
+    issue_date              DATE,
+    due_date                DATE,
+    status                  TEXT NOT NULL DEFAULT 'draft',
+    subtotal                NUMERIC(18, 2) DEFAULT 0,
+    vatable_amount          NUMERIC(18, 2) DEFAULT 0,
+    vat_amount              NUMERIC(18, 2) DEFAULT 0,
+    non_vatable_amount      NUMERIC(18, 2) DEFAULT 0,
+    wht_amount              NUMERIC(18, 2) DEFAULT 0,
+    total_amount            NUMERIC(18, 2) DEFAULT 0,
+    notes                   TEXT,
+    created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     last_modified           TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-
     UNIQUE (company_id, invoice_number, version)
 );
 """
@@ -229,10 +216,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 
 # ------------------------
-# Schema init
+# Schema initialization
 # ------------------------
 
-def init_schema() -> None:
+def init_schema():
     """
     Initialize all core schemas.
     Safe to call on every startup.
@@ -264,8 +251,7 @@ def init_schema() -> None:
             "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS company_id INTEGER;"
         )
         cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS vendor TEXT;")
-        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS requester TEXT;")
-        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS invoice_ref TEXT;")
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS account_name TEXT;")
         cur.execute(
             "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'NGN';"
         )
@@ -284,12 +270,34 @@ def init_schema() -> None:
         cur.execute(
             "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;"
         )
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS requester TEXT;")
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS invoice_ref TEXT;")
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS total_amount NUMERIC(18,2) DEFAULT 0;"
+        )
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS vatable_amount NUMERIC(18,2) DEFAULT 0;"
+        )
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS vat_amount NUMERIC(18,2) DEFAULT 0;"
+        )
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS non_vatable_amount NUMERIC(18,2) DEFAULT 0;"
+        )
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS wht_amount NUMERIC(18,2) DEFAULT 0;"
+        )
+        cur.execute(
+            "ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS payable_amount NUMERIC(18,2) DEFAULT 0;"
+        )
+        cur.execute("ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS notes TEXT;")
 
         # --- Lightweight migrations for existing voucher_lines table ---
         cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS company_id INTEGER;")
         cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS line_no INTEGER;")
         cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS description TEXT;")
         cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS amount NUMERIC(18,2);")
+        cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS account_code TEXT;")
         cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS account_name TEXT;")
         cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS vat_percent NUMERIC(5,2);")
         cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS wht_percent NUMERIC(5,2);")
@@ -298,6 +306,9 @@ def init_schema() -> None:
         cur.execute("ALTER TABLE voucher_lines ADD COLUMN IF NOT EXISTS total NUMERIC(18,2);")
 
         # --- Lightweight migrations for existing voucher_documents table ---
+        cur.execute(
+            "ALTER TABLE voucher_documents ADD COLUMN IF NOT EXISTS company_id INTEGER;"
+        )
         cur.execute(
             "ALTER TABLE voucher_documents ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;"
         )
@@ -316,10 +327,9 @@ def log_action(
     ref: str = "",
     details: str = "",
     company_id: int | None = None,
-) -> None:
+):
     """
-    Insert a row into audit_log.
-    Non-blocking – failures are swallowed.
+    Write an audit log entry. Failures are swallowed so logging never breaks main flow.
     """
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
@@ -334,10 +344,3 @@ def log_action(
     except Exception:
         # Logging must never break the main flow
         pass
-
-
-
-
-
-
-
