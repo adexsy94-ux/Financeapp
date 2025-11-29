@@ -227,53 +227,62 @@ def current_user() -> Optional[Dict]:
 
 def require_login():
     """
-    If no user in session, render login / register UI and stop.
+    If no user in session, render login + register UI and stop.
+    This version does NOT use tabs, so the register-company form is always visible.
     """
     if current_user() is not None:
         return
 
     st.markdown("<h2>FinanceApp Login</h2>", unsafe_allow_html=True)
 
-    tab_login, tab_register = st.tabs(["Login", "Register Company"])
+    # ========== LOGIN FORM ==========
+    st.markdown("### Login")
 
-    # LOGIN TAB
-    with tab_login:
+    with st.form("login_form"):
         company_code = st.text_input("Company Code", key="login_company_code")
         username = st.text_input("Username", key="login_username")
         password = st.text_input("Password", type="password", key="login_password")
+        login_submitted = st.form_submit_button("Login")
 
-        if st.button("Login"):
-            u = verify_user(company_code, username, password)
-            if not u:
-                st.error("Invalid company code, username or password.")
-            else:
-                st.session_state["user"] = u
-                st.success("Login successful.")
-                st.rerun()
+    if login_submitted:
+        u = verify_user(company_code, username, password)
+        if not u:
+            st.error("Invalid company code, username or password.")
+        else:
+            st.session_state["user"] = u
+            st.success("Login successful.")
+            st.rerun()
 
-    # REGISTER COMPANY TAB
-    with tab_register:
-        st.info("Register a new company and create the first admin.")
+    st.markdown("---")
 
+    # ========== REGISTER COMPANY + FIRST ADMIN ==========
+    st.markdown("### Register a New Company")
+
+    st.info("Register a new company and create the first admin user.")
+
+    with st.form("register_company_form"):
         company_name = st.text_input("Company Name")
         company_code = st.text_input("Company Code (e.g., ZETACOMS, JAGA)")
         admin_username = st.text_input("Admin Username")
         pw1 = st.text_input("Admin Password", type="password")
         pw2 = st.text_input("Confirm Password", type="password")
+        register_submitted = st.form_submit_button("Register Company")
 
-        if st.button("Register Company"):
-            if not company_name or not company_code or not admin_username or not pw1 or not pw2:
-                st.error("All fields are required.")
-            elif pw1 != pw2:
-                st.error("Passwords do not match.")
+    if register_submitted:
+        if not company_name or not company_code or not admin_username or not pw1 or not pw2:
+            st.error("All fields are required.")
+        elif pw1 != pw2:
+            st.error("Passwords do not match.")
+        else:
+            err = create_company_and_admin(company_name, company_code, admin_username, pw1)
+            if err:
+                st.error(err)
             else:
-                err = create_company_and_admin(company_name, company_code, admin_username, pw1)
-                if err:
-                    st.error(err)
-                else:
-                    st.success("Company registered. Go to Login tab to sign in.")
+                st.success("Company registered. Use the Login form above to sign in.")
 
+    # Prevent the rest of the app from running until logged in
     st.stop()
+
 
 
 def require_admin():
