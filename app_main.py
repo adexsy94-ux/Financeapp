@@ -1603,62 +1603,240 @@ def app_reports():
     def get_lines_for_voucher(voucher_id: int) -> pd.DataFrame:
         return get_lines_for_voucher_cached(company_id, voucher_id)
 
-    # ===================== INVOICE SUMMARY =====================
+    # -------- Build a dict of invoices by invoice_number for fast lookup --------
+    inv_by_number: Dict[str, Any] = {}
+    if not idf_latest.empty and "invoice_number" in idf_latest.columns:
+        for _, inv in idf_latest.iterrows():
+            inv_num = inv.get("invoice_number")
+            if pd.notna(inv_num):
+                inv_by_number[str(inv_num)] = inv
+
+    # ===================== PRE-AGGREGATION OVER VOUCHERS & LINES =====================
+    voucher_currency_cache: Dict[int, str] = {}
+    per_voucher_totals: Dict[int, Dict[str, float]] = {}
+    paid_by_invoice: Dict[str, Dict[str, float]] = {}
+    line_rows: List[Dict[str, Any]] = []
+    journal_rows: List[Dict[str, Any]] = []
+
+    if not vdf_latest.empty:
+        for _, v in vdf_latest.iterrows():
+            vid = int(v["id"])
+            vnum = v.get("voucher_number") or f"V{vid}"
+            inv_ref = (v.get("invoice_ref") or "").strip()
+            linked_inv = inv_by_number.get(inv_ref)
+
+            # Derive currency: invoice currency first, then voucher currency, then NGN
+            v_currency = (v.get("currency") or "NGN")
+            if linked_inv is not None:
+                v_currency = (linked_inv.get("currency") or v_currency or "NGN")
+            v_currency = (v_currency or "NGN").upper()
+            voucher_currency_cache[vid] = v_currency
+
+            # Fetch voucher lines (cached) and compute base/VAT/WHT totals
+            lines = get_lines_for_voucher(vid)
+            if lines.empty:
+                base_sum = vat_sum = wht_sum = 0.0
+            else:
+                base_sum = float(lines["amount"].sum()) if "amount" in lines.columns else 0.0
+                vat_sum = float(lines["vat_value"].sum()) if "vat_value" in lines.columns else 0.0
+                wht_sum = float(lines["wht_value"].sum()) if "wht_value" in lines.columns else 0.0
+
+            per_voucher_totals[vid] = {
+                "base": base_sum,
+                "vat": vat_sum,
+                "wht": wht_sum,
+            }
+
+            # Build detailed line rows (for Line Items report)
+            if not lines.empty:
+                for _, ln in lines.iterrows():
+                    line_rows.append(
+                        {
+                            "Voucher No": vnum,
+                            "Linked Invoice": inv_ref,
+                            "Currency": v_currency,
+                            "Description": ln.get("description", ""),
+                            "Amount": float(ln.get("amount", 0.0)),
+                            "Expense/Asset Account": ln.get("account_name", ""),
+                            "VAT %": float(ln.get("vat_percent", 0.0)),
+                            "WHT %": float(ln.get("wht_percent", 0.0)),
+                            "VAT Value": float(ln.get("vat_value", 0.0)),
+                            "WHT Value": float(ln.get("wht_value", 0.0)),
+                            "Line Total (Payable)": float(ln.get("total", 0.0)),
+                        }
+                    )
+
+            # Aggregate payments per invoice (for invoice summary)
+            if inv_ref:
+                paid_entry = paid_by_invoice.setdefault(
+                    inv_ref,
+                    {"base": 0.0, "vat": 0.0, "wht": 0.0, "voucher_count": 0},
+                )
+                paid_entry["base"] += base_sum
+                paid_entry["vat"] += vat_sum
+                paid_entry["wht"] += wht_sum
+                paid_entry["voucher_count"] += 1
+
+            # ---- Journal entries for vouchers ----
+            if linked_inv is not None:
+                # Voucher linked to an invoice: DR payable, CR suspense / WHT
+                pay_acc = linked_inv.get("payable_account") or "Accounts Payable"
+                inv_num = linked_inv.get("invoice_number") or ""
+                if not lines.empty:
+                    for _, ln in lines.iterrows():
+                        amt = float(ln.get("amount", 0.0))
+                        vat_val = float(ln.get("vat_value", 0.0))
+                        wht_val = float(ln.get("wht_value", 0.0))
+                        total_no_wht = amt + vat_val
+
+                        if total_no_wht > 0:
+                            # DR Payable (amt+vat)
+                            journal_rows.append(
+                                {
+                                    "Date": v.get("last_modified", ""),
+                                    "Type": "VOUCHER",
+                                    "Invoice No": inv_num,
+                                    "Voucher No": vnum,
+                                    "Description": f"{ln.get('description','')} (DR payable, amt+vat)",
+                                    "Currency": v_currency,
+                                    "DR Account": pay_acc,
+                                    "DR Amount": total_no_wht,
+                                    "CR Account": "",
+                                    "CR Amount": 0.0,
+                                }
+                            )
+                            # CR Suspense (amt+vat)
+                            journal_rows.append(
+                                {
+                                    "Date": v.get("last_modified", ""),
+                                    "Type": "VOUCHER",
+                                    "Invoice No": inv_num,
+                                    "Voucher No": vnum,
+                                    "Description": f"{ln.get('description','')} (CR suspense, amt+vat)",
+                                    "Currency": v_currency,
+                                    "DR Account": "",
+                                    "DR Amount": 0.0,
+                                    "CR Account": "Suspense Account",
+                                    "CR Amount": total_no_wht,
+                                }
+                            )
+                        if wht_val > 0:
+                            # DR Payable (WHT)
+                            journal_rows.append(
+                                {
+                                    "Date": v.get("last_modified", ""),
+                                    "Type": "VOUCHER",
+                                    "Invoice No": inv_num,
+                                    "Voucher No": vnum,
+                                    "Description": f"{ln.get('description','')} (DR payable WHT)",
+                                    "Currency": v_currency,
+                                    "DR Account": pay_acc,
+                                    "DR Amount": wht_val,
+                                    "CR Account": "",
+                                    "CR Amount": 0.0,
+                                }
+                            )
+                            # CR WHT Payable
+                            journal_rows.append(
+                                {
+                                    "Date": v.get("last_modified", ""),
+                                    "Type": "VOUCHER",
+                                    "Invoice No": inv_num,
+                                    "Voucher No": vnum,
+                                    "Description": f"{ln.get('description','')} (CR WHT payable)",
+                                    "Currency": v_currency,
+                                    "DR Account": "",
+                                    "DR Amount": 0.0,
+                                    "CR Account": "WHT Payable",
+                                    "CR Amount": wht_val,
+                                }
+                            )
+            else:
+                # Voucher not linked to invoice – DR expense/asset, CR suspense
+                if not lines.empty:
+                    for _, ln in lines.iterrows():
+                        amt = float(ln.get("amount", 0.0))
+                        vat_val = float(ln.get("vat_value", 0.0))
+                        wht_val = float(ln.get("wht_value", 0.0))
+                        line_payable = amt + vat_val - wht_val
+                        if line_payable <= 0:
+                            continue
+                        journal_rows.append(
+                            {
+                                "Date": v.get("last_modified", ""),
+                                "Type": "VOUCHER",
+                                "Invoice No": "",
+                                "Voucher No": vnum,
+                                "Description": f"{ln.get('description','')} (DR exp/asset)",
+                                "Currency": v_currency,
+                                "DR Account": ln.get("account_name", ""),
+                                "DR Amount": line_payable,
+                                "CR Account": "",
+                                "CR Amount": 0.0,
+                            }
+                        )
+                        journal_rows.append(
+                            {
+                                "Date": v.get("last_modified", ""),
+                                "Type": "VOUCHER",
+                                "Invoice No": "",
+                                "Voucher No": vnum,
+                                "Description": f"{ln.get('description','')} (CR suspense)",
+                                "Currency": v_currency,
+                                "DR Account": "",
+                                "DR Amount": 0.0,
+                                "CR Account": "Suspense Account",
+                                "CR Amount": line_payable,
+                            }
+                        )
+
+    df_lines = pd.DataFrame(line_rows)
+
+    # ===================== INVOICE SUMMARY (USING PRE-AGGREGATED PAYMENTS) =====================
     invoice_rows: List[Dict[str, Any]] = []
 
     if not idf_latest.empty:
         for _, inv in idf_latest.iterrows():
             inv_num = inv["invoice_number"]
-            gross = float(inv.get("total_amount", 0.0))
+            currency = (inv.get("currency") or "NGN").upper()
+
             vatable = float(inv.get("vatable_amount", 0.0))
+            non_vatable = float(inv.get("non_vatable_amount", 0.0))
             vat_amt = float(inv.get("vat_amount", 0.0))
             wht_amt = float(inv.get("wht_amount", 0.0))
-            non_vatable = float(inv.get("non_vatable_amount", 0.0))
-            payable = float(inv.get("subtotal", 0.0))
 
-            # Linked vouchers: match on invoice_ref
-            linked_vouchers = (
-                vdf_latest[vdf_latest["invoice_ref"] == inv_num]
-                if not vdf_latest.empty
-                else pd.DataFrame()
+            # Invoice totals:
+            base_invoice = vatable + non_vatable
+            gross_invoice = base_invoice + vat_amt              # Base + VAT
+            cash_payable_invoice = gross_invoice - wht_amt      # Cash expected (after WHT)
+
+            # Aggregated payments from vouchers
+            paid_info = paid_by_invoice.get(
+                inv_num,
+                {"base": 0.0, "vat": 0.0, "wht": 0.0, "voucher_count": 0},
             )
+            paid_base = float(paid_info["base"])
+            paid_vat = float(paid_info["vat"])
+            paid_wht = float(paid_info["wht"])
+            v_count = int(paid_info["voucher_count"])
 
-            paid_gross = 0.0
-            paid_payable = 0.0
-            v_count = 0
+            paid_gross = paid_base + paid_vat
+            paid_payable = paid_base + paid_vat - paid_wht
 
-            for _, v in linked_vouchers.iterrows():
-                v_id = int(v["id"])
-                v_count += 1
-                lines = get_lines_for_voucher(v_id)
-                if lines.empty:
-                    continue
+            remaining_gross = max(0.0, gross_invoice - paid_gross)
+            remaining_payable = max(0.0, cash_payable_invoice - paid_payable)
 
-                # Gross = amount + VAT + WHT
-                v_gross = float(
-                    (lines["amount"] + lines["vat_value"] + lines["wht_value"]).sum()
-                )
-                # Payable = amount + VAT - WHT
-                v_payable_sum = float(
-                    (lines["amount"] + lines["vat_value"] - lines["wht_value"]).sum()
-                )
-
-                paid_gross += v_gross
-                paid_payable += v_payable_sum
-
-            remaining_gross = max(0.0, gross - paid_gross)
-            remaining_payable = max(0.0, payable - paid_payable)
             status = (
                 "Fully Paid"
-                if remaining_gross <= 1e-6
-                else ("Partially Paid" if paid_gross > 0 else "Unpaid")
+                if remaining_payable <= 1e-6
+                else ("Partially Paid" if paid_payable > 0 else "Unpaid")
             )
 
             invoice_rows.append(
                 {
                     "Invoice No": inv_num,
                     "Vendor": inv.get("vendor", ""),
-                    "Currency": inv.get("currency", "NGN"),
+                    "Currency": currency,
                     "Vendor Inv No": inv.get("vendor_invoice_number", ""),
                     "Summary": inv.get("summary", ""),
                     "VAT Rate %": float(inv.get("vat_rate", 0.0)),
@@ -1667,8 +1845,8 @@ def app_reports():
                     "VAT": vat_amt,
                     "WHT": wht_amt,
                     "Non-Vatable": non_vatable,
-                    "Total Payable (Invoice)": payable,
-                    "Gross Invoice": gross,
+                    "Total Payable (Invoice)": cash_payable_invoice,
+                    "Gross Invoice": gross_invoice,
                     "Paid (Gross)": paid_gross,
                     "Paid (Payable)": paid_payable,
                     "Remaining (Gross)": remaining_gross,
@@ -1690,7 +1868,6 @@ def app_reports():
 
     if not df_invoices.empty:
         df_invoices["Currency"] = df_invoices["Currency"].fillna("NGN").str.upper()
-
         df_invoices_ngn = df_invoices[df_invoices["Currency"] == "NGN"]
         df_invoices_fx = df_invoices[df_invoices["Currency"] != "NGN"]
     else:
@@ -1699,37 +1876,19 @@ def app_reports():
 
     # ===================== VOUCHER SUMMARY =====================
     voucher_rows: List[Dict[str, Any]] = []
-    voucher_currency_cache: Dict[int, str] = {}
 
     if not vdf_latest.empty:
         for _, v in vdf_latest.iterrows():
             vid = int(v["id"])
+            v_totals = per_voucher_totals.get(
+                vid, {"base": 0.0, "vat": 0.0, "wht": 0.0}
+            )
+            base_sum = float(v_totals["base"])
+            vat_sum = float(v_totals["vat"])
+            wht_sum = float(v_totals["wht"])
 
-            # Derive currency from linked invoice (if any) or fallback to voucher's currency or NGN
-            v_currency = (v.get("currency") or "NGN")
-            try:
-                inv_ref = v.get("invoice_ref")
-                if isinstance(inv_ref, str) and not idf_latest.empty:
-                    inv_match = idf_latest[idf_latest["invoice_number"] == inv_ref]
-                    if not inv_match.empty:
-                        inv_row = inv_match.iloc[0]
-                        v_currency = (inv_row.get("currency") or v_currency or "NGN")
-            except Exception:
-                v_currency = v_currency or "NGN"
-
-            voucher_currency_cache[vid] = v_currency or "NGN"
-
-            lines = get_lines_for_voucher(vid)
-            if lines.empty:
-                v_payable = 0.0
-                v_gross = 0.0
-            else:
-                v_payable = float(
-                    (lines["amount"] + lines["vat_value"] - lines["wht_value"]).sum()
-                )
-                v_gross = float(
-                    (lines["amount"] + lines["vat_value"] + lines["wht_value"]).sum()
-                )
+            v_payable = base_sum + vat_sum - wht_sum
+            v_gross = base_sum + vat_sum + wht_sum
 
             voucher_rows.append(
                 {
@@ -1741,7 +1900,7 @@ def app_reports():
                     "Requester": v.get("requester", ""),
                     "Linked Invoice": v.get("invoice_ref") or "",
                     "Voucher Status": v.get("status", ""),
-                    "Currency": v_currency,
+                    "Currency": voucher_currency_cache.get(vid, "NGN"),
                     "Payable (Voucher)": v_payable,
                     "Gross (Voucher)": v_gross,
                     "Last Modified": v.get("last_modified", ""),
@@ -1750,46 +1909,13 @@ def app_reports():
 
     df_vouchers = pd.DataFrame(voucher_rows)
 
-    # ===================== LINE ITEMS =====================
-    line_rows: List[Dict[str, Any]] = []
-
-    if not vdf_latest.empty:
-        for _, v in vdf_latest.iterrows():
-            vid = int(v["id"])
-            lines = get_lines_for_voucher(vid)
-            if lines.empty:
-                continue
-            v_currency = voucher_currency_cache.get(vid, "NGN")
-            vnum = v.get("voucher_number") or f"V{vid}"
-            inv_ref = v.get("invoice_ref") or ""
-            for _, ln in lines.iterrows():
-                line_rows.append(
-                    {
-                        "Voucher No": vnum,
-                        "Linked Invoice": inv_ref,
-                        "Currency": v_currency,
-                        "Description": ln.get("description", ""),
-                        "Amount": float(ln.get("amount", 0.0)),
-                        "Expense/Asset Account": ln.get("account_name", ""),
-                        "VAT %": float(ln.get("vat_percent", 0.0)),
-                        "WHT %": float(ln.get("wht_percent", 0.0)),
-                        "VAT Value": float(ln.get("vat_value", 0.0)),
-                        "WHT Value": float(ln.get("wht_value", 0.0)),
-                        "Line Total (Payable)": float(ln.get("total", 0.0)),
-                    }
-                )
-
-    df_lines = pd.DataFrame(line_rows)
-
     # ===================== GENERAL JOURNAL =====================
-    journal_rows: List[Dict[str, Any]] = []
-
-    # Invoices DR/CR
+    # Add invoice DR/CR entries on top of voucher entries we already built
     if not idf_latest.empty:
         for _, inv in idf_latest.iterrows():
             inv_num = inv["invoice_number"]
             summary = inv.get("summary", "")
-            inv_currency = (inv.get("currency") or "NGN")
+            inv_currency = (inv.get("currency") or "NGN").upper()
 
             vatable = float(inv.get("vatable_amount", 0.0))
             non_vatable = float(inv.get("non_vatable_amount", 0.0))
@@ -1831,131 +1957,6 @@ def app_reports():
                         "CR Amount": invoice_drcr_total,
                     }
                 )
-
-    # Vouchers postings
-    if not vdf_latest.empty:
-        for _, v in vdf_latest.iterrows():
-            vnum = v.get("voucher_number") or f"V{v['id']}"
-            lines = get_lines_for_voucher(int(v["id"]))
-            if lines.empty:
-                continue
-
-            linked_inv = None
-            inv_ref = v.get("invoice_ref")
-            if inv_ref and not idf_latest.empty:
-                inv_match = idf_latest[idf_latest["invoice_number"] == inv_ref]
-                if not inv_match.empty:
-                    linked_inv = inv_match.iloc[0]
-
-            if linked_inv is not None:
-                pay_acc = linked_inv.get("payable_account") or "Accounts Payable"
-                inv_num = linked_inv["invoice_number"]
-                v_currency = (linked_inv.get("currency") or "NGN")
-                for _, ln in lines.iterrows():
-                    amt = float(ln.get("amount", 0.0))
-                    vat_val = float(ln.get("vat_value", 0.0))
-                    wht_val = float(ln.get("wht_value", 0.0))
-                    total_no_wht = amt + vat_val
-                    if total_no_wht > 0:
-                        # DR Payable (amt+vat)
-                        journal_rows.append(
-                            {
-                                "Date": v.get("last_modified", ""),
-                                "Type": "VOUCHER",
-                                "Invoice No": inv_num,
-                                "Voucher No": vnum,
-                                "Description": f"{ln.get('description','')} (DR payable, amt+vat)",
-                                "Currency": v_currency,
-                                "DR Account": pay_acc,
-                                "DR Amount": total_no_wht,
-                                "CR Account": "",
-                                "CR Amount": 0.0,
-                            }
-                        )
-                        # CR Suspense (amt+vat)
-                        journal_rows.append(
-                            {
-                                "Date": v.get("last_modified", ""),
-                                "Type": "VOUCHER",
-                                "Invoice No": inv_num,
-                                "Voucher No": vnum,
-                                "Description": f"{ln.get('description','')} (CR suspense, amt+vat)",
-                                "Currency": v_currency,
-                                "DR Account": "",
-                                "DR Amount": 0.0,
-                                "CR Account": "Suspense Account",
-                                "CR Amount": total_no_wht,
-                            }
-                        )
-                    if wht_val > 0:
-                        # DR Payable (WHT)
-                        journal_rows.append(
-                            {
-                                "Date": v.get("last_modified", ""),
-                                "Type": "VOUCHER",
-                                "Invoice No": inv_num,
-                                "Voucher No": vnum,
-                                "Description": f"{ln.get('description','')} (DR payable WHT)",
-                                "Currency": v_currency,
-                                "DR Account": pay_acc,
-                                "DR Amount": wht_val,
-                                "CR Account": "",
-                                "CR Amount": 0.0,
-                            }
-                        )
-                        # CR WHT Payable
-                        journal_rows.append(
-                            {
-                                "Date": v.get("last_modified", ""),
-                                "Type": "VOUCHER",
-                                "Invoice No": inv_num,
-                                "Voucher No": vnum,
-                                "Description": f"{ln.get('description','')} (CR WHT payable)",
-                                "Currency": v_currency,
-                                "DR Account": "",
-                                "DR Amount": 0.0,
-                                "CR Account": "WHT Payable",
-                                "CR Amount": wht_val,
-                            }
-                        )
-            else:
-                # Voucher not linked to invoice – DR expense/asset, CR suspense
-                v_currency = voucher_currency_cache.get(int(v["id"]), "NGN")
-                for _, ln in lines.iterrows():
-                    amt = float(ln.get("amount", 0.0))
-                    vat_val = float(ln.get("vat_value", 0.0))
-                    wht_val = float(ln.get("wht_value", 0.0))
-                    line_payable = amt + vat_val - wht_val
-                    if line_payable <= 0:
-                        continue
-                    journal_rows.append(
-                        {
-                            "Date": v.get("last_modified", ""),
-                            "Type": "VOUCHER",
-                            "Invoice No": "",
-                            "Voucher No": vnum,
-                            "Description": f"{ln.get('description','')} (DR exp/asset)",
-                            "Currency": v_currency,
-                            "DR Account": ln.get("account_name", ""),
-                            "DR Amount": line_payable,
-                            "CR Account": "",
-                            "CR Amount": 0.0,
-                        }
-                    )
-                    journal_rows.append(
-                        {
-                            "Date": v.get("last_modified", ""),
-                            "Type": "VOUCHER",
-                            "Invoice No": "",
-                            "Voucher No": vnum,
-                            "Description": f"{ln.get('description','')} (CR suspense)",
-                            "Currency": v_currency,
-                            "DR Account": "",
-                            "DR Amount": 0.0,
-                            "CR Account": "Suspense Account",
-                            "CR Amount": line_payable,
-                        }
-                    )
 
     df_journal = pd.DataFrame(journal_rows)
 
@@ -2105,6 +2106,7 @@ def app_reports():
     else:
         st.caption("Click the button above to build and download the Excel report.")
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 def app_user_management():
     require_permission("can_manage_users")
@@ -2345,8 +2347,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
