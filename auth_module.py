@@ -27,21 +27,20 @@ def _hash_password(password: str) -> str:
 def _ensure_user_columns(cur) -> None:
     """
     Hardened migration to guarantee new columns on existing DBs.
-    Safe to run multiple times (errors are ignored).
+
+    IMPORTANT: we use IF NOT EXISTS so Postgres does NOT throw errors
+    when the column is already there (avoids InFailedSqlTransaction).
     """
-    alter_statements = (
-        "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user';",
-        "ALTER TABLE users ADD COLUMN can_create_voucher BOOLEAN DEFAULT TRUE;",
-        "ALTER TABLE users ADD COLUMN can_approve_voucher BOOLEAN DEFAULT FALSE;",
-        "ALTER TABLE users ADD COLUMN can_manage_users BOOLEAN DEFAULT FALSE;",
-        "ALTER TABLE users ADD COLUMN company_id INTEGER;",
+    cur.execute(
+        """
+        ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS role                TEXT    DEFAULT 'user',
+            ADD COLUMN IF NOT EXISTS can_create_voucher  BOOLEAN DEFAULT TRUE,
+            ADD COLUMN IF NOT EXISTS can_approve_voucher BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS can_manage_users    BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS company_id          INTEGER;
+        """
     )
-    for alter_sql in alter_statements:
-        try:
-            cur.execute(alter_sql)
-        except Exception:
-            # Column may already exist, or table definition differs; ignore.
-            pass
 
 
 # ------------------------
@@ -51,7 +50,7 @@ def _ensure_user_columns(cur) -> None:
 def init_auth():
     """
     Ensure auth tables and required columns exist.
-    This now also ensures role / permission columns are present on users.
+    This also ensures role / permission columns are present on users.
     """
     try:
         with closing(connect()) as conn, closing(conn.cursor()) as cur:
@@ -228,7 +227,7 @@ def current_user() -> Optional[Dict]:
 def require_login():
     """
     If no user in session, render login + register UI and stop.
-    This version does NOT use tabs, so the register-company form is always visible.
+    (No tabs, so the register-company form is always visible.)
     """
     if current_user() is not None:
         return
@@ -257,7 +256,6 @@ def require_login():
 
     # ========== REGISTER COMPANY + FIRST ADMIN ==========
     st.markdown("### Register a New Company")
-
     st.info("Register a new company and create the first admin user.")
 
     with st.form("register_company_form"):
@@ -282,7 +280,6 @@ def require_login():
 
     # Prevent the rest of the app from running until logged in
     st.stop()
-
 
 
 def require_admin():
