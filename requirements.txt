@@ -10,3 +10,4 @@ plotly
 pdf2image
 pymupdf
 bcrypt
+pytest
