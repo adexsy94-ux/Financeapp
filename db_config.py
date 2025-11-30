@@ -22,15 +22,42 @@ def get_db_url(env_var: str = DEFAULT_DB_URL_ENV, override_url: Optional[str] = 
     Priority:
     1. override_url (explicit argument)
     2. environment variable (e.g. VOUCHER_DB_URL)
+    3. Streamlit secrets (VOUCHER_DB_URL / voucher_db_url / DB_URL / DATABASE_URL / POSTGRES_URL)
+
+    This makes it work both locally (env vars) and on Streamlit Cloud (secrets).
     """
     if override_url:
         return override_url
 
+    # First try OS environment variable
     url = os.getenv(env_var)
+
+    # If not set, try Streamlit secrets (for Streamlit Cloud)
+    if not url:
+        try:
+            import streamlit as st  # type: ignore
+
+            possible_keys = [
+                env_var,
+                env_var.lower(),          # e.g. voucher_db_url
+                "DB_URL",
+                "DATABASE_URL",
+                "POSTGRES_URL",
+            ]
+            for key in possible_keys:
+                if key in st.secrets:
+                    url = st.secrets[key]
+                    break
+        except Exception:
+            # Streamlit not available or secrets not configured
+            url = None
+
     if not url:
         raise RuntimeError(
-            f"Database URL not set. Please define the environment variable {env_var}."
+            f"Database URL not set. Please set {env_var} as an environment variable "
+            f"or define one of {env_var}, {env_var.lower()}, DB_URL, DATABASE_URL, POSTGRES_URL in Streamlit secrets."
         )
+
     return url
 
 
@@ -126,6 +153,10 @@ def run_migrations(
       Example: migrations/001_add_auth_security_columns.sql -> version '001_add_auth_security_columns'
 
     This function is idempotent: already-applied migrations are skipped.
+
+    NOTE:
+      This will raise RuntimeError if no DB URL can be found. You should catch that
+      in app_main.py and show a friendly Streamlit error instead of crashing.
     """
     path = pathlib.Path(migrations_path)
     if not path.exists():
