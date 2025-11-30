@@ -1,140 +1,75 @@
-import os
-import datetime
-from typing import Optional, Dict, Any, Tuple
+# auth_module.py
+# Multi-tenant authentication, company registration, and user management.
 
-import bcrypt
-from psycopg2.extras import DictRow
+import hashlib
+from contextlib import closing
+from typing import Optional, Dict, List
 
-from db_config import get_db_cursor
+import psycopg2
+import streamlit as st
 
-# =========================
-# CONFIGURABLE CONSTANTS
-# =========================
-
-# Maximum number of failed attempts before locking the account
-MAX_FAILED_ATTEMPTS = 5
-
-# Lockout duration in minutes after too many failed attempts
-LOCKOUT_MINUTES = 15
-
-# Default session length in minutes (8 hours)
-DEFAULT_SESSION_MINUTES = 8 * 60
+from db_config import (
+    connect,
+    COMPANIES_TABLE_SQL,
+    AUTH_TABLE_SQL,
+    log_action,
+)
 
 
-# =========================
-# HELPER FUNCTIONS
-# =========================
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
-def _normalize(value: str) -> str:
+
+# ------------------------
+# INTERNAL: ensure user columns exist
+# ------------------------
+
+def _ensure_user_columns(cur) -> None:
     """
-    Simple normalization for usernames / codes: strip + lowercase.
+    Hardened migration to guarantee new columns on existing DBs.
+
+    IMPORTANT: we use IF NOT EXISTS so Postgres does NOT throw errors
+    when the column is already there (avoids InFailedSqlTransaction).
     """
-    return value.strip().lower()
+    cur.execute(
+        """
+        ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS role                TEXT    DEFAULT 'user',
+            ADD COLUMN IF NOT EXISTS can_create_voucher  BOOLEAN DEFAULT TRUE,
+            ADD COLUMN IF NOT EXISTS can_approve_voucher BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS can_manage_users    BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS company_id          INTEGER;
+        """
+    )
 
 
-def hash_password(plain_password: str) -> str:
+# ------------------------
+# Init helper for app_main
+# ------------------------
+
+def init_auth():
     """
-    Hash a password using bcrypt. The returned string includes the salt.
+    Ensure auth tables and required columns exist.
+    This also ensures role / permission columns are present on users.
     """
-    if not plain_password:
-        raise ValueError("Password cannot be empty.")
-
-    hashed = bcrypt.hashpw(plain_password.encode("utf-8"), bcrypt.gensalt())
-    return hashed.decode("utf-8")
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """
-    Verify a password against a bcrypt hash.
-    """
-    if not plain_password or not hashed_password:
-        return False
-
     try:
-        return bcrypt.checkpw(
-            plain_password.encode("utf-8"),
-            hashed_password.encode("utf-8"),
-        )
-    except ValueError:
-        # If the stored hash is invalid / corrupted
-        return False
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            # Base tables (as defined in db_config)
+            cur.execute(COMPANIES_TABLE_SQL)
+            cur.execute(AUTH_TABLE_SQL)
+
+            # Ensure newer permission columns exist on existing DBs
+            _ensure_user_columns(cur)
+
+            conn.commit()
+    except Exception:
+        # We don't want init to crash the app; any real issues will surface later.
+        pass
 
 
-def _utcnow() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
-
-
-def _is_account_locked(user_row: DictRow, now: Optional[datetime.datetime] = None) -> bool:
-    """
-    Check if an account is currently locked.
-    Expects columns: locked_until, failed_attempts, is_active.
-    """
-    if user_row is None:
-        return False
-
-    if not user_row.get("is_active", True):
-        return True
-
-    locked_until = user_row.get("locked_until")
-    if locked_until is None:
-        return False
-
-    if now is None:
-        now = _utcnow()
-
-    return locked_until > now
-
-
-def _update_failed_attempt(user_id: int, reset: bool) -> None:
-    """
-    Update failed_attempts and locked_until for a user.
-    - If reset is True, reset counters after a successful login.
-    - If reset is False, increment failed_attempts and lock if above threshold.
-    """
-    now = _utcnow()
-    with get_db_cursor() as (conn, cur):
-        if reset:
-            cur.execute(
-                """
-                UPDATE users
-                SET failed_attempts = 0,
-                    locked_until = NULL
-                WHERE id = %s
-                """,
-                (user_id,),
-            )
-            return
-
-        # Increment failed attempts and fetch the new value
-        cur.execute(
-            """
-            UPDATE users
-            SET failed_attempts = failed_attempts + 1
-            WHERE id = %s
-            RETURNING failed_attempts
-            """,
-            (user_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return
-
-        failed_attempts = row[0]
-        if failed_attempts >= MAX_FAILED_ATTEMPTS:
-            lockout_until = now + datetime.timedelta(minutes=LOCKOUT_MINUTES)
-            cur.execute(
-                """
-                UPDATE users
-                SET locked_until = %s
-                WHERE id = %s
-                """,
-                (lockout_until, user_id),
-            )
-
-
-# =========================
-# PUBLIC AUTH API
-# =========================
+# ------------------------
+# Company + first admin
+# ------------------------
 
 def create_company_and_admin(
     company_name: str,
@@ -143,326 +78,355 @@ def create_company_and_admin(
     admin_password: str,
 ) -> Optional[str]:
     """
-    Create a new company (if it doesn't exist) and an admin user for that company.
-    Returns None on success, or an error message string on failure.
-
-    Expected DB structure (adjust to your current schema if needed):
-
-    - companies:
-        id SERIAL PRIMARY KEY
-        name TEXT NOT NULL
-        code TEXT NOT NULL UNIQUE
-
-    - users:
-        id SERIAL PRIMARY KEY
-        company_id INTEGER NOT NULL REFERENCES companies(id)
-        username TEXT NOT NULL
-        password_hash TEXT NOT NULL
-        full_name TEXT
-        role TEXT NOT NULL DEFAULT 'user'
-        is_admin BOOLEAN NOT NULL DEFAULT FALSE
-        is_active BOOLEAN NOT NULL DEFAULT TRUE
-        failed_attempts INTEGER NOT NULL DEFAULT 0
-        locked_until TIMESTAMPTZ
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    Create a new company and its first admin user.
+    Returns None on success or error message on failure.
     """
-    company_code_norm = _normalize(company_code)
-    admin_username_norm = _normalize(admin_username)
+    company_name = (company_name or "").strip()
+    company_code_norm = (company_code or "").strip().lower()
+    admin_username_norm = (admin_username or "").strip().lower()
 
-    if not admin_password:
-        return "Admin password cannot be empty."
+    if not company_name or not company_code_norm:
+        return "Company name and company code are required."
+    if not admin_username_norm or not admin_password:
+        return "Admin username and password are required."
 
-    try:
-        with get_db_cursor() as (conn, cur):
-            # 1. Get or create company
-            cur.execute(
-                """
-                SELECT id FROM companies
-                WHERE lower(code) = %s
-                """,
-                (company_code_norm,),
-            )
-            row = cur.fetchone()
+    pw_hash = _hash_password(admin_password)
 
-            if row:
-                company_id = row[0]
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO companies (name, code)
-                    VALUES (%s, %s)
-                    RETURNING id
-                    """,
-                    (company_name.strip(), company_code_norm),
-                )
-                company_id = cur.fetchone()[0]
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
+        # Ensure tables exist
+        cur.execute(COMPANIES_TABLE_SQL)
+        cur.execute(AUTH_TABLE_SQL)
 
-            # 2. Check if admin user already exists for this company
-            cur.execute(
-                """
-                SELECT id
-                FROM users
-                WHERE company_id = %s AND lower(username) = %s
-                """,
-                (company_id, admin_username_norm),
-            )
-            existing_user = cur.fetchone()
-            if existing_user:
-                return "Admin user already exists for this company."
+        # Ensure required columns exist (same migration logic as init_auth)
+        _ensure_user_columns(cur)
 
-            # 3. Create admin user with bcrypt-hashed password
-            password_hash = hash_password(admin_password)
+        # Check company code uniqueness
+        cur.execute(
+            "SELECT id FROM companies WHERE lower(code) = %s",
+            (company_code_norm,),
+        )
+        existing = cur.fetchone()
+        if existing:
+            return "A company with this code already exists."
 
+        # Create company
+        cur.execute(
+            """
+            INSERT INTO companies (name, code)
+            VALUES (%s, %s)
+            RETURNING id
+            """,
+            (company_name, company_code_norm),
+        )
+        company_id = cur.fetchone()["id"]
+
+        # Create admin user
+        try:
             cur.execute(
                 """
                 INSERT INTO users (
-                    company_id,
                     username,
                     password_hash,
-                    full_name,
+                    company_id,
                     role,
-                    is_admin,
-                    is_active
+                    can_create_voucher,
+                    can_approve_voucher,
+                    can_manage_users
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, TRUE, TRUE, TRUE)
                 """,
                 (
-                    company_id,
                     admin_username_norm,
-                    password_hash,
-                    "Administrator",
+                    pw_hash,
+                    company_id,
                     "admin",
-                    True,
-                    True,
                 ),
             )
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
+            return "A user with this username already exists. Please choose a different admin username."
+        except Exception as ex:
+            conn.rollback()
+            return f"Error creating admin user: {ex}"
 
+        conn.commit()
+
+    log_action(
+        admin_username_norm,
+        "create_company_and_admin",
+        "companies",
+        ref=str(company_id),
+        details=f"company_code={company_code_norm}",
+        company_id=company_id,
+    )
+
+    return None
+
+
+# ------------------------
+# Login & session
+# ------------------------
+
+def verify_user(company_code: str, username: str, password: str) -> Optional[Dict]:
+    """
+    Verify that a username/password exists for a given company code.
+    Returns a dict with user & company info on success, or None.
+    """
+    company_code_norm = (company_code or "").strip().lower()
+    username_norm = (username or "").strip().lower()
+
+    if not company_code_norm or not username_norm or not password:
         return None
 
-    except Exception as ex:
-        # In a real app, log this error properly
-        return f"Error creating company/admin: {ex}"
-
-
-def verify_user(
-    company_code: str,
-    username: str,
-    password: str,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """
-    Verify a user login attempt.
-
-    Returns (user_dict, error_message):
-
-    - If login is successful:
-        (user_dict, None)
-    - If login fails:
-        (None, "some error message")
-
-    user_dict will include at least:
-    - id
-    - company_id
-    - username
-    - full_name
-    - role
-    - is_admin
-    """
-    company_code_norm = _normalize(company_code)
-    username_norm = _normalize(username)
-
-    if not password:
-        return None, "Password cannot be empty."
-
-    with get_db_cursor() as (conn, cur):
-        # 1. Get company id
-        cur.execute(
-            """
-            SELECT id
-            FROM companies
-            WHERE lower(code) = %s
-            """,
-            (company_code_norm,),
-        )
-        company_row = cur.fetchone()
-        if not company_row:
-            return None, "Invalid company code."
-
-        company_id = company_row[0]
-
-        # 2. Fetch user row (including auth-related fields)
-        cur.execute(
-            """
-            SELECT
-                id,
-                company_id,
-                username,
-                password_hash,
-                full_name,
-                role,
-                is_admin,
-                is_active,
-                failed_attempts,
-                locked_until
-            FROM users
-            WHERE company_id = %s AND lower(username) = %s
-            """,
-            (company_id, username_norm),
-        )
-        user_row = cur.fetchone()
-
-        if not user_row:
-            return None, "Invalid username or password."
-
-        # Convert to dict for convenience
-        user = {
-            "id": user_row["id"],
-            "company_id": user_row["company_id"],
-            "username": user_row["username"],
-            "password_hash": user_row["password_hash"],
-            "full_name": user_row["full_name"],
-            "role": user_row["role"],
-            "is_admin": user_row["is_admin"],
-            "is_active": user_row["is_active"],
-            "failed_attempts": user_row["failed_attempts"],
-            "locked_until": user_row["locked_until"],
-        }
-
-        # 3. Check if account is locked
-        if _is_account_locked(user):
-            return None, "Account is temporarily locked due to too many failed attempts. Please try again later."
-
-        # 4. Verify password
-        if not verify_password(password, user["password_hash"]):
-            _update_failed_attempt(user["id"], reset=False)
-            return None, "Invalid username or password."
-
-        # 5. Successful login → reset failed attempts
-        _update_failed_attempt(user["id"], reset=True)
-
-        # 6. Build a safe public user dict (do not include password hash)
-        public_user = {
-            "id": user["id"],
-            "company_id": user["company_id"],
-            "username": user["username"],
-            "full_name": user["full_name"],
-            "role": user["role"],
-            "is_admin": user["is_admin"],
-        }
-
-        return public_user, None
-
-
-# =========================
-# SIMPLE SESSION TOKENS
-# =========================
-
-def create_session(user_id: int, minutes: int = DEFAULT_SESSION_MINUTES) -> str:
-    """
-    Create a simple session record in a 'user_sessions' table and return the token.
-
-    Expected DB structure (adjust if you already have something):
-
-    CREATE TABLE IF NOT EXISTS user_sessions (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER NOT NULL REFERENCES users(id),
-        session_token TEXT NOT NULL UNIQUE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        expires_at TIMESTAMPTZ NOT NULL,
-        is_active BOOLEAN NOT NULL DEFAULT TRUE
-    );
-    """
-    import secrets
-
-    token = secrets.token_urlsafe(32)
-    now = _utcnow()
-    expires_at = now + datetime.timedelta(minutes=minutes)
-
-    with get_db_cursor() as (conn, cur):
-        cur.execute(
-            """
-            INSERT INTO user_sessions (
-                user_id,
-                session_token,
-                created_at,
-                expires_at,
-                is_active
-            )
-            VALUES (%s, %s, %s, %s, %s)
-            """,
-            (user_id, token, now, expires_at, True),
-        )
-
-    return token
-
-
-def get_session_user(session_token: str) -> Optional[Dict[str, Any]]:
-    """
-    Validate a session token and return a user dict if valid, else None.
-    """
-    if not session_token:
-        return None
-
-    now = _utcnow()
-    with get_db_cursor() as (conn, cur):
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """
             SELECT
                 u.id,
-                u.company_id,
                 u.username,
-                u.full_name,
+                u.password_hash,
                 u.role,
-                u.is_admin,
-                s.expires_at,
-                s.is_active
-            FROM user_sessions s
-            JOIN users u ON u.id = s.user_id
-            WHERE s.session_token = %s
+                u.can_create_voucher,
+                u.can_approve_voucher,
+                u.can_manage_users,
+                u.company_id,
+                c.name AS company_name,
+                c.code AS company_code
+            FROM users u
+            JOIN companies c ON u.company_id = c.id
+            WHERE lower(c.code) = %s
+              AND lower(u.username) = %s
             """,
-            (session_token,),
+            (company_code_norm, username_norm),
         )
         row = cur.fetchone()
-        if not row:
-            return None
 
-        if not row["is_active"]:
-            return None
+    if not row:
+        return None
 
-        if row["expires_at"] <= now:
-            # Optionally mark expired
-            cur.execute(
-                """
-                UPDATE user_sessions
-                SET is_active = FALSE
-                WHERE session_token = %s
-                """,
-                (session_token,),
-            )
-            return None
+    if row["password_hash"] != _hash_password(password):
+        return None
 
-        return {
-            "id": row["id"],
-            "company_id": row["company_id"],
-            "username": row["username"],
-            "full_name": row["full_name"],
-            "role": row["role"],
-            "is_admin": row["is_admin"],
-        }
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "role": row["role"],
+        "company_id": row["company_id"],
+        "company_name": row["company_name"],
+        "company_code": row["company_code"],
+        "can_create_voucher": bool(row["can_create_voucher"]),
+        "can_approve_voucher": bool(row["can_approve_voucher"]),
+        "can_manage_users": bool(row["can_manage_users"]),
+    }
 
 
-def invalidate_session(session_token: str) -> None:
+def current_user() -> Optional[Dict]:
+    return st.session_state.get("user")
+
+
+def require_login():
     """
-    Mark a session as inactive (logout).
+    If no user in session, render login + register UI and stop.
+    (No tabs, so the register-company form is always visible.)
     """
-    if not session_token:
+    if current_user() is not None:
         return
 
-    with get_db_cursor() as (conn, cur):
+    st.markdown("<h2>FinanceApp Login</h2>", unsafe_allow_html=True)
+
+    # ========== LOGIN FORM ==========
+    st.markdown("### Login")
+
+    with st.form("login_form"):
+        company_code = st.text_input("Company Code", key="login_company_code")
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
+        login_submitted = st.form_submit_button("Login")
+
+    if login_submitted:
+        u = verify_user(company_code, username, password)
+        if not u:
+            st.error("Invalid company code, username or password.")
+        else:
+            st.session_state["user"] = u
+            st.success("Login successful.")
+            st.rerun()
+
+    st.markdown("---")
+
+    # ========== REGISTER COMPANY + FIRST ADMIN ==========
+    st.markdown("### Register a New Company")
+    st.info("Register a new company and create the first admin user.")
+
+    with st.form("register_company_form"):
+        company_name = st.text_input("Company Name")
+        company_code = st.text_input("Company Code (e.g., ZETACOMS, JAGA)")
+        admin_username = st.text_input("Admin Username")
+        pw1 = st.text_input("Admin Password", type="password")
+        pw2 = st.text_input("Confirm Password", type="password")
+        register_submitted = st.form_submit_button("Register Company")
+
+    if register_submitted:
+        if not company_name or not company_code or not admin_username or not pw1 or not pw2:
+            st.error("All fields are required.")
+        elif pw1 != pw2:
+            st.error("Passwords do not match.")
+        else:
+            err = create_company_and_admin(company_name, company_code, admin_username, pw1)
+            if err:
+                st.error(err)
+            else:
+                st.success("Company registered. Use the Login form above to sign in.")
+
+    # Prevent the rest of the app from running until logged in
+    st.stop()
+
+
+def require_admin():
+    user = current_user()
+    if not user:
+        require_login()
+        return
+    if user["role"] != "admin":
+        st.error("You do not have permission to view this page.")
+        st.stop()
+
+
+def require_permission(permission_flag: str):
+    user = current_user()
+    if not user:
+        require_login()
+        return
+    if not user.get(permission_flag, False):
+        st.error("You do not have permission for this action.")
+        st.stop()
+
+
+# ------------------------
+# User management APIs
+# ------------------------
+
+def list_users(company_id: int) -> List[Dict]:
+    with closing(connect()) as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """
-            UPDATE user_sessions
-            SET is_active = FALSE
-            WHERE session_token = %s
+            SELECT id, username, role,
+                   can_create_voucher,
+                   can_approve_voucher,
+                   can_manage_users,
+                   created_at
+            FROM users
+            WHERE company_id = %s
+            ORDER BY username
             """,
-            (session_token,),
+            (company_id,),
         )
+        rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_user_for_company(
+    company_id: int,
+    username: str,
+    password: str,
+    role: str,
+    can_create_voucher: bool,
+    can_approve_voucher: bool,
+    can_manage_users: bool,
+    actor_username: str,
+) -> Optional[str]:
+    username_norm = (username or "").strip().lower()
+    if not username_norm or not password:
+        return "Username and password required."
+
+    if role not in ("user", "admin"):
+        return "Invalid role."
+
+    pw_hash = _hash_password(password)
+
+    try:
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            cur.execute(
+                """
+                INSERT INTO users (
+                    username,
+                    password_hash,
+                    company_id,
+                    role,
+                    can_create_voucher,
+                    can_approve_voucher,
+                    can_manage_users
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    username_norm,
+                    pw_hash,
+                    company_id,
+                    role,
+                    bool(can_create_voucher),
+                    bool(can_approve_voucher),
+                    bool(can_manage_users),
+                ),
+            )
+            conn.commit()
+
+        log_action(
+            actor_username,
+            "create_user",
+            "users",
+            ref=username_norm,
+            details=f"company_id={company_id}, role={role}",
+            company_id=company_id,
+        )
+        return None
+    except Exception as e:
+        return f"Error creating user: {e}"
+
+
+def update_user_permissions(
+    actor_username: str,
+    user_id: int,
+    company_id: int,
+    role: str,
+    can_create_voucher: bool,
+    can_approve_voucher: bool,
+    can_manage_users: bool,
+) -> Optional[str]:
+    if role not in ("user", "admin"):
+        return "Invalid role."
+
+    try:
+        with closing(connect()) as conn, closing(conn.cursor()) as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET role = %s,
+                    can_create_voucher = %s,
+                    can_approve_voucher = %s,
+                    can_manage_users = %s
+                WHERE id = %s
+                  AND company_id = %s
+                """,
+                (
+                    role,
+                    bool(can_create_voucher),
+                    bool(can_approve_voucher),
+                    bool(can_manage_users),
+                    user_id,
+                    company_id,
+                ),
+            )
+            conn.commit()
+
+        log_action(
+            actor_username,
+            "update_user_permissions",
+            "users",
+            ref=str(user_id),
+            details=f"company_id={company_id}, role={role}",
+            company_id=company_id,
+        )
+        return None
+    except Exception as e:
+        return f"Error updating permissions: {e}"
