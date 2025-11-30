@@ -6,6 +6,10 @@ import pandas as pd
 import psycopg2
 import io
 import base64
+from db_config import run_migrations
+
+run_migrations()
+
 
 
 from typing import List, Dict, Any, Optional
